@@ -2,7 +2,7 @@
 
 # Ascent Learning Agents
 
-An agent that learns from real results. A WhatsApp front desk in Egyptian Arabic, English and Franco. Built for the Meta Global AI Developer Hackathon.
+An agent that learns from real results, starting with the front desk. One inbox for all your sales channels, WhatsApp first, in Egyptian Arabic, English and Franco. Built for the Meta Global AI Developer Hackathon.
 
 *Being built during the hackathon, 28 October to 4 November 2026. This page grows as each part works.*
 
