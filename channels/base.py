@@ -17,6 +17,7 @@ class Message:
     audio_mime: str | None = None
     images: list[Image] = field(default_factory=list)
     rejected_images: int = 0        # photos dropped by the type or size check
+    audio_failed: bool = False      # a voice note that could not be fetched or was not ogg
     message_id: str = ""
     timestamp: int = 0
 

@@ -3,6 +3,7 @@
 Model id: BASETEN_MODEL from env, default "meta-models/muse-spark-open-1026", the id that
 worked in our 27 Oct tests. The Baseten changelog names it "meta-models/muse-spark-open".
 """
+import http
 import json
 import urllib.error
 import urllib.request
@@ -19,6 +20,13 @@ EFFORT_STUDY = "high"     # the night study, later this week
 
 class ModelError(Exception):
     """The model call failed. The message never holds the key."""
+
+
+def _phrase(code):
+    try:
+        return http.HTTPStatus(code).phrase
+    except ValueError:
+        return "error"
 
 
 class Model:
@@ -54,8 +62,8 @@ class Model:
             with self._open(req, timeout=self.timeout) as r:
                 out = json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            detail = e.read(500).decode("utf-8", "replace") if e.fp else ""
-            raise ModelError(f"Baseten answered {e.code}: {detail}") from None
+            # Only the status. The body can echo the request (customer text) or more, so it is never read.
+            raise ModelError(f"Baseten answered {e.code} {_phrase(e.code)}") from None
         except (urllib.error.URLError, TimeoutError, ValueError) as e:
             raise ModelError(f"Baseten call failed: {type(e).__name__}") from None
         try:

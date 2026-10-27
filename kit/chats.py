@@ -6,6 +6,11 @@ send checks. That way branch() can rebuild the stage and the failure count at
 any step.
 
 Media bytes are never stored, only a sha256 and the mime type.
+
+Webhook message ids: an id is saved as pending, with the parsed message, when it is
+queued, and marked done in the same transaction that saves the customer's step. A
+restart re-queues pending messages (at most MAX_ATTEMPTS times each), so nothing that
+Meta already got a 200 for is lost.
 """
 import json
 import time
@@ -40,17 +45,32 @@ CREATE TABLE IF NOT EXISTS steps (
 );
 CREATE TABLE IF NOT EXISTS seen_messages (
   message_id TEXT PRIMARY KEY,
-  at REAL NOT NULL
+  at REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  payload TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0
 );
 """
+# Columns added to seen_messages after the first live tests, for databases made before them.
+SEEN_COLUMNS = (
+    ("status", "TEXT NOT NULL DEFAULT 'done'"),
+    ("payload", "TEXT"),
+    ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 FIRST_STAGE = "asking"
+MAX_ATTEMPTS = 3
 
 
 class Chats:
     def __init__(self, db=None):
         self.db = db if db is not None else Db()
         self.db.script(SCHEMA)
+        with self.db.tx() as c:
+            have = {r[1] for r in c.execute("PRAGMA table_info(seen_messages)")}
+            for name, decl in SEEN_COLUMNS:
+                if name not in have:
+                    c.execute(f"ALTER TABLE seen_messages ADD COLUMN {name} {decl}")
 
     # chats
 
@@ -100,13 +120,24 @@ class Chats:
             self._add(c, chat_id, "event", content=json.dumps({"check_failed": feedback}, ensure_ascii=False))
             return c.execute("SELECT failed_checks FROM chats WHERE id = ?", (chat_id,)).fetchone()[0]
 
+    def reset_failed_checks(self, chat_id):
+        """After a reply passes the check, the count starts again. Recorded as an event when it was not 0."""
+        with self.db.tx() as c:
+            cur = c.execute("UPDATE chats SET failed_checks = 0, updated_at = ? WHERE id = ? AND failed_checks > 0",
+                            (time.time(), chat_id))
+            if cur.rowcount:
+                self._add(c, chat_id, "event", content=json.dumps({"checks_reset": True}))
+
     # steps
 
-    def add_step(self, chat_id, role, content=None, tool_calls=None, tool_call_id=None, name=None, media=None):
-        """Save one step. Returns its number."""
+    def add_step(self, chat_id, role, content=None, tool_calls=None, tool_call_id=None, name=None, media=None,
+                 message_id=None):
+        """Save one step. Returns its number. message_id: the webhook id this step saves, marked done here."""
         with self.db.tx() as c:
             n = self._add(c, chat_id, role, content, tool_calls, tool_call_id, name, media)
             c.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (time.time(), chat_id))
+            if message_id:
+                c.execute("UPDATE seen_messages SET status = 'done' WHERE message_id = ?", (message_id,))
             return n
 
     def _add(self, c, chat_id, role, content=None, tool_calls=None, tool_call_id=None, name=None, media=None):
@@ -177,6 +208,8 @@ class Chats:
                     stage = ev["stage"]
                 if "check_failed" in ev:
                     failed += 1
+                if "checks_reset" in ev:
+                    failed = 0
         with self.db.tx() as c:
             new_id = self._new(c, src["channel"], src["customer_id"], stage, failed, chat_id, at_step)
             for s in steps:
@@ -190,11 +223,34 @@ class Chats:
 
     # webhook retries
 
-    def first_seen(self, message_id):
-        """True the first time a channel message id is seen, False on every retry."""
+    def first_seen(self, message_id, payload=None):
+        """True the first time a channel message id is seen, False on every retry.
+
+        The id is kept as pending, with payload (the parsed message), until its step is saved.
+        """
         with self.db.tx() as c:
-            cur = c.execute("INSERT OR IGNORE INTO seen_messages VALUES (?, ?)", (message_id, time.time()))
+            cur = c.execute(
+                "INSERT OR IGNORE INTO seen_messages (message_id, at, status, payload) VALUES (?, ?, 'pending', ?)",
+                (message_id, time.time(), json.dumps(payload, ensure_ascii=False) if payload is not None else None))
             return cur.rowcount == 1
+
+    def forget(self, message_id):
+        """Drop a pending id that could not be queued, so Meta's retry is taken."""
+        with self.db.tx() as c:
+            c.execute("DELETE FROM seen_messages WHERE message_id = ? AND status = 'pending'", (message_id,))
+
+    def pending(self, limit=100):
+        """Payloads queued but never saved (the process stopped first), oldest first.
+
+        Each call counts one attempt; a message comes back at most MAX_ATTEMPTS times.
+        """
+        with self.db.tx() as c:
+            rows = c.execute(
+                "SELECT message_id, payload FROM seen_messages WHERE status = 'pending' AND payload IS NOT NULL "
+                "AND attempts < ? ORDER BY at LIMIT ?", (MAX_ATTEMPTS, limit)).fetchall()
+            c.executemany("UPDATE seen_messages SET attempts = attempts + 1 WHERE message_id = ?",
+                          [(r["message_id"],) for r in rows])
+        return [json.loads(r["payload"]) for r in rows]
 
 
 MEDIA_NOTE = {

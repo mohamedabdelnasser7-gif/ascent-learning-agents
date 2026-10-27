@@ -8,6 +8,13 @@ It listens on 127.0.0.1:PORT (default 8080). Meta must reach it through a public
   parses the body (HMAC SHA-256 with the app secret, constant-time compare). Then text,
   voice notes and photos are parsed, deduped by message id (Meta retries), and queued.
   One worker thread answers them in order, so the webhook returns 200 at once.
+- A customer over a model call limit (kit/limits.py) is not queued for a turn; the
+  worker only saves the message and sends the fixed line, once per window.
+- The queue holds at most MAX_QUEUE messages. When it is full the webhook answers 503
+  and forgets the id, so Meta's retry is taken later.
+- Each connection gets SOCKET_TIMEOUT seconds; a stalled body is dropped.
+- Media: only from Meta's media host over https, with no redirects, so the token is
+  never sent anywhere else.
 
 Graph API version: GRAPH_API_VERSION, default v26.0, the latest in Meta's changelog
 (https://developers.facebook.com/docs/graph-api/changelog, checked 28 Oct 2026; v26.0
@@ -23,10 +30,11 @@ import re
 import threading
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from channels.base import Channel, Image, Message
+from kit import limits as limits_mod
 from kit import media
 
 log = logging.getLogger("channels.whatsapp")
@@ -35,7 +43,13 @@ GRAPH = "https://graph.facebook.com"
 GRAPH_VERSION_DEFAULT = "v26.0"
 MAX_BODY = 1024 * 1024
 MAX_AUDIO_BYTES = 16 * 1024 * 1024
+AUDIO_TYPES = ("audio/ogg",)            # WhatsApp voice notes: audio/ogg; codecs=opus
+MEDIA_HOSTS = ("lookaside.fbsbx.com",)  # where Graph's media urls point (checked 28 Oct 2026)
 MIN_SECRET = 32
+SOCKET_TIMEOUT = 10
+MAX_QUEUE = 200
+REQUIRED_ENV = ("WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
+                "BASETEN_API_KEY", "OPERATOR_WHATSAPP")
 SIGNATURE = re.compile(r"sha256=([0-9a-f]{64})")
 CHALLENGE = re.compile(r"[0-9A-Za-z_-]{1,128}")
 
@@ -117,6 +131,32 @@ class TooBig(Exception):
     pass
 
 
+class Busy(Exception):
+    """The queue is full; the webhook answers 503 so Meta retries later."""
+
+
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect, so the Authorization header never follows one to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def no_redirect_opener():
+    return urllib.request.build_opener(NoRedirects())
+
+
+def media_url_ok(url):
+    """True only for an https url on Meta's media host, default port, no user info."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    return (parts.scheme == "https" and parts.hostname in MEDIA_HOSTS and port in (None, 443)
+            and parts.username is None and parts.password is None)
+
+
 class Graph(Channel):
     """Sends replies and downloads media through the Graph API."""
 
@@ -126,7 +166,7 @@ class Graph(Channel):
         self._token = token
         self.phone_number_id = phone_number_id
         self.version = version
-        self._open = opener or urllib.request.urlopen
+        self._open = opener or no_redirect_opener().open
         self.timeout = timeout
 
     def _req(self, url, data=None):
@@ -155,6 +195,8 @@ class Graph(Channel):
         url = str(info.get("url", ""))
         if urllib.parse.urlsplit(url).scheme != "https":
             raise ValueError("media url is not https")
+        if not media_url_ok(url):
+            raise ValueError("media url is not on Meta's media host")
         with self._open(self._req(url), timeout=self.timeout) as r:
             data = r.read(max_bytes + 1)
         if len(data) > max_bytes:
@@ -167,11 +209,21 @@ def to_message(inc, graph):
     msg = Message(channel="whatsapp", customer_id=inc.customer_id, text=inc.text,
                   message_id=inc.message_id, timestamp=inc.timestamp)
     if inc.kind == "audio":
+        declared = inc.media_mime.split(";")[0].strip().lower()
+        if declared not in AUDIO_TYPES:
+            msg.audio_failed = True
+            return msg
         try:
-            msg.audio, mime = graph.download(inc.media_id, MAX_AUDIO_BYTES)
-            msg.audio_mime = mime or inc.media_mime
+            audio, mime = graph.download(inc.media_id, MAX_AUDIO_BYTES)
         except Exception:
             log.exception("voice note download failed")
+            msg.audio_failed = True
+            return msg
+        mime = mime or inc.media_mime
+        if mime.split(";")[0].strip().lower() not in AUDIO_TYPES or not audio:
+            msg.audio_failed = True
+            return msg
+        msg.audio, msg.audio_mime = audio, mime
     elif inc.kind == "image":
         declared = inc.media_mime.split(";")[0].strip().lower()
         if declared not in media.IMAGE_TYPES:
@@ -197,7 +249,7 @@ def to_message(inc, graph):
 
 # server
 
-def make_handler(app_secret, verify_token, accept, phone_number_id=None):
+def make_handler(app_secret, verify_token, accept, phone_number_id=None, timeout=SOCKET_TIMEOUT):
     """The request handler. accept(list of Incoming) runs only for signed, parsed bodies."""
     if not app_secret or len(app_secret) < MIN_SECRET:
         raise ValueError("WHATSAPP_APP_SECRET is missing or too short")
@@ -243,6 +295,9 @@ def make_handler(app_secret, verify_token, accept, phone_number_id=None):
                 return self._reply(400, "bad json")
             try:
                 accept(parse(payload, phone_number_id))
+            except Busy:
+                log.warning("queue full; asked Meta to retry")
+                return self._reply(503, "busy")
             except Exception:
                 log.exception("could not queue messages")
                 return self._reply(500, "error")
@@ -250,62 +305,102 @@ def make_handler(app_secret, verify_token, accept, phone_number_id=None):
 
         def log_message(self, fmt, *args):
             # The default log prints the full request line, and the GET query holds the verify token.
-            log.info("%s %s", self.command, urllib.parse.urlsplit(self.path).path)
+            log.info("%s %s", self.command, urllib.parse.urlsplit(self.path or "").path)
 
+    Handler.timeout = timeout  # seconds per socket read; a stalled body ends the connection
     return Handler
 
 
 class App:
-    """Dedupes and queues incoming messages, and answers them one at a time."""
+    """Dedupes and queues incoming messages, and answers them one at a time.
 
-    def __init__(self, chats, model, lessons, results, graph):
+    Queue items are (over, Incoming): over is None for a normal turn, or the model call
+    limit the customer was already at when the message came in.
+    """
+
+    def __init__(self, chats, model, lessons, results, graph, limits=None, maxsize=MAX_QUEUE):
         self.chats, self.model, self.lessons, self.results, self.graph = chats, model, lessons, results, graph
-        self.q = queue.Queue()
+        self.limits = limits
+        self.q = queue.Queue(maxsize=maxsize)
 
     def accept(self, items):
         for inc in items:
-            if self.chats.first_seen(inc.message_id):
-                self.q.put(inc)
+            if not self.chats.first_seen(inc.message_id, asdict(inc)):
+                continue
+            over = None
+            if self.limits is not None:
+                over = self.limits.over(limits_mod.key("whatsapp", inc.customer_id))
+            try:
+                self.q.put_nowait((over, inc))
+            except queue.Full:
+                self.chats.forget(inc.message_id)
+                raise Busy() from None
 
-    def work_one(self, inc):
+    def requeue_pending(self):
+        """At start: queue the messages a stopped process had accepted but never saved."""
+        room = self.q.maxsize - self.q.qsize() if self.q.maxsize > 0 else MAX_QUEUE
+        n = 0
+        for p in self.chats.pending(limit=max(room, 0)):
+            try:
+                self.q.put_nowait((None, Incoming(**p)))
+                n += 1
+            except (TypeError, queue.Full):
+                log.warning("could not re-queue a pending message")
+        return n
+
+    def work_one(self, item):
         from frontdesk import loop
-        msg = to_message(inc, self.graph)
+        over, inc = item
+        if over:
+            # Over a limit: nothing is downloaded and no model is called. The text is saved for the team.
+            msg = Message(channel="whatsapp", customer_id=inc.customer_id, text=inc.text,
+                          message_id=inc.message_id, timestamp=inc.timestamp)
+        else:
+            msg = to_message(inc, self.graph)
         return loop.turn(msg, chats=self.chats, model=self.model, lessons=self.lessons,
-                         results=self.results, send=self.graph.send)
+                         results=self.results, send=self.graph.send, limits=self.limits, over=over)
 
     def work(self):
         while True:
-            inc = self.q.get()
-            if inc is None:
+            item = self.q.get()
+            if item is None:
                 return
             try:
-                self.work_one(inc)
+                self.work_one(item)
             except Exception:
                 log.exception("turn failed")
+
+
+def missing_env():
+    """Names in REQUIRED_ENV that are not set. The server does not start without them."""
+    from kit import env
+    return [n for n in REQUIRED_ENV if not env.get(n)]
 
 
 def main():
     from kit import env
     from kit.chats import Chats
     from kit.db import Db
+    from kit.limits import Limits
     from kit.model import Model
     from learning.lessons import Lessons
     from learning.results import Results
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     env.load()
-    need = ["WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
-            "BASETEN_API_KEY"]
-    missing = [n for n in need if not env.get(n)]
+    missing = missing_env()
     if missing:
         raise SystemExit("Missing in .env: " + ", ".join(missing))
     db = Db()
     pnid = env.get("WHATSAPP_PHONE_NUMBER_ID")
     graph = Graph(env.get("WHATSAPP_TOKEN"), pnid, env.get("GRAPH_API_VERSION", GRAPH_VERSION_DEFAULT))
-    app = App(Chats(db), Model(), Lessons(db), Results(db), graph)
+    app = App(Chats(db), Model(), Lessons(db), Results(db), graph, limits=Limits(db))
     handler = make_handler(env.get("WHATSAPP_APP_SECRET"), env.get("WHATSAPP_VERIFY_TOKEN"), app.accept, pnid)
     port = int(env.get("PORT", "8080"))
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    requeued = app.requeue_pending()
+    if requeued:
+        log.info("re-queued %d messages saved before the last stop", requeued)
     threading.Thread(target=app.work, daemon=True).start()
     log.info("listening on 127.0.0.1:%d", port)
     try:

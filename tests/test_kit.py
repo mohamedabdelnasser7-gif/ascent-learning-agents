@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import secrets
@@ -184,6 +185,67 @@ class ModelTest(unittest.TestCase):
         with self.assertRaises(ModelError):
             Model(api_key="").chat([])
 
+    def test_http_error_keeps_only_the_status(self):
+        body = ('{"error": "bad request", "echo": "Bearer ' + self.key + ' customer said: my address is 12 Nile St"}').encode()
+
+        def opener(req, timeout):
+            raise urllib.error.HTTPError(ENDPOINT, 401, "Unauthorized " + self.key, {}, io.BytesIO(body))
+
+        with self.assertRaises(ModelError) as e:
+            Model(api_key=self.key, opener=opener).chat([])
+        text = str(e.exception)
+        self.assertEqual(text, "Baseten answered 401 Unauthorized")
+        self.assertNotIn(self.key, text)
+        self.assertNotIn("Nile", text)
+
+
+class SeenAndChecksTest(unittest.TestCase):
+    def setUp(self):
+        self.db = Db(":memory:")
+        self.addCleanup(self.db.close)
+        self.chats = Chats(self.db)
+
+    def test_pending_until_the_user_step_is_saved(self):
+        self.assertTrue(self.chats.first_seen("wamid.1", {"message_id": "wamid.1", "text": "hi"}))
+        self.assertFalse(self.chats.first_seen("wamid.1", {"message_id": "wamid.1"}))
+        self.assertEqual(Chats(self.db).pending(), [{"message_id": "wamid.1", "text": "hi"}])
+        cid = self.chats.open("whatsapp", "2011")
+        self.chats.add_step(cid, "user", content="hi", message_id="wamid.1")
+        self.assertEqual(self.chats.pending(), [])
+
+    def test_pending_comes_back_at_most_three_times(self):
+        self.chats.first_seen("wamid.2", {"message_id": "wamid.2"})
+        got = [len(self.chats.pending()) for _ in range(5)]
+        self.assertEqual(got, [1, 1, 1, 0, 0])
+
+    def test_forget_lets_a_retry_in(self):
+        self.chats.first_seen("wamid.3", {})
+        self.chats.forget("wamid.3")
+        self.assertTrue(self.chats.first_seen("wamid.3", {}))
+
+    def test_old_seen_table_gets_the_new_columns(self):
+        db = Db(":memory:")
+        self.addCleanup(db.close)
+        db.script("CREATE TABLE seen_messages (message_id TEXT PRIMARY KEY, at REAL NOT NULL);"
+                  "INSERT INTO seen_messages VALUES ('old', 1.0);")
+        chats = Chats(db)
+        self.assertEqual(chats.pending(), [])
+        self.assertTrue(chats.first_seen("new", {"message_id": "new"}))
+        self.assertEqual(chats.pending(), [{"message_id": "new"}])
+
+    def test_failed_checks_reset_and_branch_follows(self):
+        cid = self.chats.open("whatsapp", "2012")
+        self.chats.add_step(cid, "user", content="hi")
+        self.chats.add_failed_check(cid, "x")
+        self.chats.add_failed_check(cid, "y")
+        self.chats.reset_failed_checks(cid)
+        self.chats.reset_failed_checks(cid)  # no second event when already 0
+        self.chats.add_failed_check(cid, "z")
+        self.assertEqual(self.chats.failed_checks(cid), 1)
+        events = [s["content"] for s in self.chats.steps(cid) if s["role"] == "event"]
+        self.assertEqual(sum('"checks_reset"' in e for e in events), 1)
+        self.assertEqual(self.chats.failed_checks(self.chats.branch(cid, len(self.chats.steps(cid)))), 1)
+
 
 class StoreTest(unittest.TestCase):
     def setUp(self):
@@ -195,13 +257,14 @@ class StoreTest(unittest.TestCase):
         adult = [i for i in items if i["title"].startswith("Nilestep Socks")]
         self.assertEqual({v["price"] for i in adult for v in i["variants"]}, {"949"})
         black_l = [v for i in items if i["title"] == "Nilestep Socks, Black" for v in i["variants"] if v["size"].startswith("L")]
-        self.assertEqual((black_l[0]["available"], black_l[0]["in_stock"]), (0, False))
+        self.assertEqual(black_l[0]["stock"], "out")
 
     def test_only_fields_in_the_data(self):
         for item in store.catalogue():
             self.assertLessEqual(set(item), {"title", "type", "description", "variants"})
             for v in item["variants"]:
-                self.assertLessEqual(set(v), {"size", "price", "sku", "available", "in_stock"})
+                self.assertLessEqual(set(v), {"size", "price", "sku", "stock"})
+                self.assertIn(v.get("stock"), ("in stock", "few left", "out"))
                 self.assertNotIn("currency", v)
 
     def test_search_and_checks(self):
@@ -210,6 +273,19 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(store.run({"query": "zzz"}, None)["items"]), 10)
         self.assertFalse(store.check({"query": "x", "price": 1}, None)[0])
         self.assertFalse(store.check({"query": "x" * 101}, None)[0])
+
+    def test_stock_is_a_level_never_a_count(self):
+        self.assertEqual([store.stock_level(q) for q in (-1, 0, 1, 4, 5, 31)],
+                         ["out", "out", "few left", "few left", "in stock", "in stock"])
+        self.assertEqual(store.FEW_LEFT, 5)
+        out = store.run({"query": ""}, None)
+        for item in out["items"]:
+            for v in item["variants"]:
+                self.assertNotIn("available", v)
+                self.assertFalse(any(isinstance(x, int) for x in v.values()), v)
+
+    def test_size_strings(self):
+        self.assertIn("M (EU 42-45)", store.size_strings())
 
     def test_price_points(self):
         pts = store.price_points()

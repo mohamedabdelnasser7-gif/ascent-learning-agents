@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import unittest
 from unittest import mock
 
@@ -8,8 +9,10 @@ from frontdesk import loop, stages
 from kit import tools
 from kit.chats import Chats
 from kit.db import Db
+from kit.limits import Limits
+from kit.model import ModelError
 from kit.tools import voice_note
-from kit.tools.handoff import TAKING_OVER
+from kit.tools.handoff import SUMMARY_LABEL, TAKING_OVER
 from learning.lessons import Lessons
 from learning.results import Results
 from tests.fake_model import FakeModel, Outbox, call, clean_env, say, tool_names
@@ -43,10 +46,12 @@ class StageTools(unittest.TestCase):
         self.assertNotIn("with_person", [t for s in stages.STAGES.values() for t in s.moves_to])
 
     def test_a_tool_outside_the_stage_is_refused(self):
-        ctx = tools.Context("c", stages.STAGES["my_order"], None, None, None, print)
+        ctx = tools.Context("c", stages.STAGES["my_order"], None, None, None, print, stages=stages.STAGES)
         self.assertFalse(tools.run("store", {}, ctx)["ok"])
         self.assertFalse(tools.run("made_up", {}, ctx)["ok"])
         self.assertFalse(tools.run("switch_stage", {"to": "with_person"}, ctx)["ok"])
+        self.assertFalse(tools.run("switch_stage", {"to": "my_order"}, ctx)["ok"])
+        self.assertTrue(tools.run("switch_stage", {"to": "asking"}, ctx)["ok"])
 
 
 class Turns(unittest.TestCase):
@@ -92,7 +97,77 @@ class Turns(unittest.TestCase):
         self.assertIn("349", retry)
         self.assertIn("الجوز", retry)
         self.assertEqual(self.outcomes(r.chat_id), ["check_failed", "replied"])
-        self.assertEqual(self.chats.failed_checks(r.chat_id), 1)
+        self.assertEqual(self.chats.failed_checks(r.chat_id), 0)  # a passing reply starts the count again
+
+    def test_failed_checks_reset_after_a_passing_reply(self):
+        clean_env(self, OPERATOR_WHATSAPP=OPERATOR)
+        for _ in range(3):
+            r = self.turn(FakeModel(say("It is 1 EGP."), say("Ask me anything.")), "hello there, a question")
+            self.assertEqual(r.outcome, "replied")
+        r = self.turn(FakeModel(say("It is 1 EGP."), say("It is 1 EGP."), say("It is 1 EGP."), say("ملخص")),
+                      "hello there, a question")
+        self.assertEqual(r.outcome, "handed_off")
+        self.assertEqual(self.outcomes(r.chat_id)[-4:], ["check_failed"] * 3 + ["handed_off"])
+
+    def test_voice_transcript_adds_no_amount(self):
+        model = FakeModel(call("voice_note"), say('{"price": 5}'), say("The black hoodie is 5 EGP."),
+                          say("I will check the price with the team."))
+        r = self.turn(model, "", audio=b"RIFF fake", audio_mime="audio/wav")
+        self.assertEqual(self.out.sent, [(CUSTOMER, "I will check the price with the team.")])
+        self.assertEqual(self.outcomes(r.chat_id), ["check_failed", "replied"])
+
+    def test_three_calls_per_step_and_one_transcription(self):
+        many = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{i}", "type": "function", "function": {"name": "voice_note", "arguments": "{}"}} for i in range(6)]}
+        model = FakeModel(many, say("عايز شراب"), say("أيوه عندنا."))
+        with mock.patch.object(voice_note, "to_wav", return_value=b"RIFF0000WAVE") as conv:
+            r = self.turn(model, "", audio=b"OggS fake", audio_mime="audio/ogg")
+        self.assertEqual((r.outcome, len(model.calls), conv.call_count), ("replied", 3, 1))
+        results = [json.loads(s["content"]) for s in self.chats.steps(r.chat_id) if s["role"] == "tool"]
+        self.assertEqual(len(results), 6)
+        self.assertEqual([x.get("ok") for x in results], [True, True, True, False, False, False])
+        self.assertIn("At most 3", results[3]["feedback"])
+        self.assertEqual(loop.MAX_CALLS_PER_STEP, 3)
+
+    def test_tool_arguments_as_object_or_junk(self):
+        obj = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "store", "arguments": {"query": "black socks"}}},
+            {"id": "c2", "type": "function", "function": {"name": "store", "arguments": 123}}]}
+        r = self.turn(FakeModel(obj, say("Yes, black socks are 949 EGP.")), "black socks?")
+        self.assertEqual(r.outcome, "replied")
+        results = [json.loads(s["content"]) for s in self.chats.steps(r.chat_id) if s["role"] == "tool"]
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual(results[1], {"ok": False, "feedback": "Tool arguments must be a JSON object."})
+
+    def test_model_down_hands_off(self):
+        clean_env(self, OPERATOR_WHATSAPP=OPERATOR)
+
+        def down(messages, tools_sent):
+            raise ModelError("Baseten call failed: URLError")
+
+        r = self.turn(FakeModel(down, down), "عندكم شراب؟")
+        self.assertEqual((r.outcome, self.chats.stage(r.chat_id)), ("handed_off", "with_person"))
+        self.assertEqual([t for to, t in self.out.sent if to == CUSTOMER], [TAKING_OVER["arabic"]])
+        row = self.results.for_chat(r.chat_id)[-1]
+        self.assertEqual((row["outcome"], row["detail"]["by"]), ("handed_off", "model_error"))
+
+    def test_voice_note_that_failed_to_download(self):
+        model = FakeModel()
+        r = self.turn(model, "", audio_failed=True)
+        self.assertEqual((r.outcome, self.out.sent), ("replied", [(CUSTOMER, loop.VOICE_NOT_HEARD["arabic"])]))
+        self.assertEqual(model.calls, [])
+        self.assertNotIn("(empty message)", json.dumps(self.chats.steps(r.chat_id), ensure_ascii=False))
+
+    def test_operator_summary_is_checked_and_labelled(self):
+        clean_env(self, OPERATOR_WHATSAPP=OPERATOR)
+        model = FakeModel(call("handoff", reason="customer wants a person"),
+                          say("العميل عايز يكلم حد " + chr(0x1F621) + " **فورا**"))
+        self.turn(model, "عايز اكلم حد")
+        note = [t for to, t in self.out.sent if to == OPERATOR][0]
+        self.assertIn(SUMMARY_LABEL, note)
+        self.assertIn("السبب: customer wants a person", note)
+        self.assertNotIn(chr(0x1F621), note)
+        self.assertNotIn("**", note)
 
     def test_three_failed_checks_hand_off(self):
         clean_env(self, OPERATOR_WHATSAPP=OPERATOR)
@@ -133,6 +208,7 @@ class Turns(unittest.TestCase):
         model = FakeModel(*[call("store", query="socks") for _ in range(loop.MAX_TOOL_STEPS)],
                           say("Yes, we have them at 949 EGP."))
         self.turn(model, "socks?")
+        self.assertEqual(loop.MAX_TOOL_STEPS, 4)
         self.assertEqual(len(model.calls), loop.MAX_TOOL_STEPS + 1)
         self.assertIsNone(model.calls[-1]["tools"])
 
@@ -171,6 +247,46 @@ class Turns(unittest.TestCase):
         self.assertEqual((parts[1]["type"], parts[1]["input_audio"]["format"]), ("input_audio", "wav"))
         self.assertEqual(self.out.sent, [(CUSTOMER, "أيوه عندنا مقاس 43، بـ 949 جنيه.")])
         self.assertEqual(self.chats.steps(r.chat_id)[0]["media"][0]["kind"], "audio")
+
+
+class LimitTurns(unittest.TestCase):
+    def setUp(self):
+        clean_env(self)
+        self.db = Db(":memory:")
+        self.addCleanup(self.db.close)
+        self.chats, self.lessons, self.results = Chats(self.db), Lessons(self.db), Results(self.db)
+        self.out = Outbox()
+        self.now = [1000.0]
+
+    def limits(self, **kw):
+        return Limits(self.db, clock=lambda: self.now[0], **kw)
+
+    def turn(self, model, text, limits, customer=CUSTOMER):
+        msg = Message(channel="whatsapp", customer_id=customer, text=text)
+        return loop.turn(msg, chats=self.chats, model=model, lessons=self.lessons, results=self.results,
+                         send=self.out, limits=limits)
+
+    def test_per_customer_limit_and_one_line_per_window(self):
+        lim = self.limits(per_customer=2)
+        self.assertEqual(self.turn(FakeModel(call("store", query="socks"), say("Yes, 949 EGP.")), "socks?", lim).outcome,
+                         "replied")
+        later = [self.turn(FakeModel(), "socks?", lim) for _ in range(2)]
+        self.assertEqual([r.outcome for r in later], ["limited", "limited"])
+        self.assertEqual([t for _, t in self.out.sent[1:]], [loop.LIMIT_LINE["english"]])
+        self.now[0] += 601
+        self.assertEqual(self.turn(FakeModel(say("Yes, 949 EGP.")), "socks?", lim).outcome, "replied")
+
+    def test_limit_reached_mid_turn(self):
+        lim = self.limits(per_customer=1)
+        r = self.turn(FakeModel(call("store", query="socks"), say("never reached")), "عندكم شراب؟", lim)
+        self.assertEqual((r.outcome, self.out.sent), ("limited", [(CUSTOMER, loop.LIMIT_LINE["arabic"])]))
+        self.assertEqual(self.results.for_chat(r.chat_id)[-1]["detail"], {"limit": "customer", "told": True})
+
+    def test_daily_limit_covers_everyone(self):
+        lim = self.limits(daily=1)
+        self.turn(FakeModel(say("Yes, 949 EGP.")), "socks?", lim)
+        r = self.turn(FakeModel(), "3ndko sharabat?", lim, customer="201222222222")
+        self.assertEqual((r.outcome, self.out.sent[-1][1]), ("limited", loop.LIMIT_LINE["franco"]))
 
 
 if __name__ == "__main__":

@@ -3,6 +3,9 @@
 Reads the Shopify Admin GraphQL API when SHOPIFY_STORE and SHOPIFY_TOKEN are set,
 else demo/catalogue.json. Answers only with fields present in the data: a field the
 data does not have is left out, never filled in.
+
+Stock goes out as a level, never a count (Mohamed's call, 28 Oct): "in stock",
+"few left" (under FEW_LEFT) or "out".
 """
 import html
 import json
@@ -19,12 +22,14 @@ DEMO_DELIVERY = ROOT / "demo" / "delivery.json"
 # Not checked against live docs today: set SHOPIFY_API_VERSION to the current one from shopify.dev.
 SHOPIFY_DEFAULT_VERSION = "2026-10"
 CACHE_SECONDS = 300
+FEW_LEFT = 5
 
 NAME = "store"
 DEFINITION = {"type": "function", "function": {
     "name": NAME,
     "description": (
-        "Look up the store's products: names, prices, sizes and stock. Search in English words "
+        "Look up the store's products: names, prices, sizes and stock level (in stock, few left or out). "
+        "Search in English words "
         "like 'black socks' or 'shin pad'. Leave query empty to get every product."),
     "parameters": {
         "type": "object",
@@ -77,6 +82,13 @@ def catalogue(fresh=False):
     return items
 
 
+def stock_level(quantity):
+    """The stock level the model may see: "in stock", "few left" or "out". Never the count."""
+    if quantity <= 0:
+        return "out"
+    return "few left" if quantity < FEW_LEFT else "in stock"
+
+
 def _put(d, key, value):
     if value is not None and value != "" and value != []:
         d[key] = value
@@ -104,8 +116,7 @@ def _from_demo(path):
             _put(var, "sku", v.get("sku"))
             qty = [q["quantity"] for q in v.get("inventoryQuantities", []) if q.get("name") == "available"]
             if qty:
-                var["available"] = sum(qty)
-                var["in_stock"] = sum(qty) > 0
+                var["stock"] = stock_level(sum(qty))
             variants.append(var)
         _put(item, "variants", variants)
         items.append(item)
@@ -155,8 +166,7 @@ def _from_shopify():
                 _put(var, "currency", currency)
                 _put(var, "sku", v.get("sku"))
                 if v.get("inventoryQuantity") is not None:
-                    var["available"] = v["inventoryQuantity"]
-                    var["in_stock"] = v["inventoryQuantity"] > 0
+                    var["stock"] = stock_level(v["inventoryQuantity"])
                 variants.append(var)
             _put(item, "variants", variants)
             items.append(item)
@@ -193,3 +203,8 @@ def vocabulary():
         for v in item.get("variants", []):
             words |= set(re.findall(r"[a-z]+", v.get("size", "").lower()))
     return frozenset(words)
+
+
+def size_strings():
+    """Every size string in the catalogue ("M (EU 42-45)"), so the send check never reads a size as an amount."""
+    return frozenset(v["size"] for item in catalogue() for v in item.get("variants", []) if v.get("size"))

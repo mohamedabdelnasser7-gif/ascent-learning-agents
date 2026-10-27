@@ -8,7 +8,7 @@ import logging
 
 from kit import env
 from kit.model import EFFORT_REPLY
-from kit.send_check import DASHES, detect_script
+from kit.send_check import DASHES, detect_script, style_problems
 
 log = logging.getLogger("kit.tools.handoff")
 
@@ -36,6 +36,10 @@ SUMMARY_PROMPT = (
     "You write for the store team. Summarise this customer chat in Egyptian Arabic, in Arabic letters, "
     "in three short lines at most: what the customer wants, what was already said, and why a person is "
     "needed. No dashes, no greetings.")
+
+# The note to the operator says plainly that the summary is the model's reading of customer messages.
+SUMMARY_LABEL = "ملخص لرسايل العميل، كتبه الإيجنت من الشات:"
+NO_SUMMARY = "(مفيش ملخص)"
 
 
 def check(args, ctx):
@@ -73,7 +77,13 @@ def summary(ctx, reason):
     except Exception:
         log.exception("summary failed")
         text = ""
-    return text or f"السبب: {reason}"
+    if text and style_problems(text):
+        log.warning("summary failed the style check; sending the reason only")
+        text = ""
+    if text:
+        return text
+    reason_line = f"السبب: {DASHES.sub(',', reason)}"
+    return NO_SUMMARY if style_problems(reason_line) else reason_line
 
 
 def run(args, ctx):
@@ -83,7 +93,7 @@ def run(args, ctx):
     operator = env.get("OPERATOR_WHATSAPP")
     told_operator = False
     if operator:
-        note = f"محادثة محتاجة حد من الفريق\nالعميل: {customer}\n{summary(ctx, reason)}"
+        note = f"محادثة محتاجة حد من الفريق\nالعميل: {customer}\n{SUMMARY_LABEL}\n{summary(ctx, reason)}"
         try:
             ctx.send(operator, note)
             told_operator = True

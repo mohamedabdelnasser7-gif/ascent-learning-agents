@@ -1,7 +1,7 @@
 """The result log. Every agent turn is recorded with its outcome.
 
 Outcomes today: replied, check_failed (one row per blocked reply, with the check's
-feedback), handed_off. Later tools add ordered, delivered and refused, matched to
+feedback), handed_off, limited (over a model call limit, no model call made). Later tools add ordered, delivered and refused, matched to
 the chat once the real result is known. The night study reads this log.
 """
 import json
@@ -9,7 +9,7 @@ import time
 
 from kit.db import Db
 
-OUTCOMES = ("replied", "check_failed", "handed_off", "ordered", "delivered", "refused")
+OUTCOMES = ("replied", "check_failed", "handed_off", "limited", "ordered", "delivered", "refused")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (

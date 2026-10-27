@@ -5,6 +5,10 @@ APIs overview say Muse Spark Open accepts audio input, but the request format is
 documented. This sends the OpenAI-style input_audio content part with a wav file
 (WhatsApp sends ogg/opus, so ffmpeg converts it first). tests/probes/voice_probe.py
 checks this live and tries other shapes; change only transcribe() if it says so.
+
+ffmpeg reads only ogg from stdin (no other demuxer, no network or file protocol), stops
+after MAX_SECONDS of audio and writes at most MAX_WAV_BYTES. The voice note is heard
+once per turn; a second call in the same turn gets the first result.
 """
 import base64
 import subprocess
@@ -15,6 +19,11 @@ from kit.model import EFFORT_REPLY
 NAME = "voice_note"
 DEFAULT_FFMPEG = "/opt/homebrew/bin/ffmpeg"
 MAX_AUDIO_BYTES = 16 * 1024 * 1024
+MAX_SECONDS = 120
+# 16 kHz mono 16-bit is 32,000 bytes a second, plus the wav header: about 3.84 MB for 120 s.
+MAX_WAV_BYTES = 4_000_000
+FFMPEG_TIMEOUT = 30
+NOT_HEARD = {"ok": False, "feedback": "The voice note could not be heard. Ask the customer to send it again or type it."}
 
 DEFINITION = {"type": "function", "function": {
     "name": NAME,
@@ -39,18 +48,30 @@ def check(args, ctx):
 
 
 def run(args, ctx):
+    cache = ctx.cache
+    if NAME in cache:
+        return cache[NAME]
+    cache[NAME] = dict(NOT_HEARD)  # held even if transcribe fails, so the turn never hears it twice
     text = transcribe(ctx.message.audio, ctx.message.audio_mime, ctx.model)
-    if not text:
-        return {"ok": False, "feedback": "The voice note could not be heard. Ask the customer to send it again or type it."}
-    return {"ok": True, "text": text}
+    if text:
+        cache[NAME] = {"ok": True, "text": text}
+    return cache[NAME]
 
 
-def to_wav(audio, ffmpeg=None, timeout=30):
-    """Any audio the ffmpeg build reads, to 16 kHz mono wav. List args, no shell."""
+def command(ffmpeg):
+    """The ffmpeg argv: ogg from stdin only, at most MAX_SECONDS out, at most MAX_WAV_BYTES written."""
+    return [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-protocol_whitelist", "pipe", "-f", "ogg", "-i", "pipe:0",
+            "-t", str(MAX_SECONDS), "-fs", str(MAX_WAV_BYTES),
+            "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"]
+
+
+def to_wav(audio, ffmpeg=None, timeout=FFMPEG_TIMEOUT):
+    """An ogg voice note to 16 kHz mono wav. List args, no shell, a timeout and a size cap."""
     ffmpeg = ffmpeg or env.get("FFMPEG", DEFAULT_FFMPEG)
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
-           "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"]
-    out = subprocess.run(cmd, input=audio, capture_output=True, timeout=timeout, check=True)
+    out = subprocess.run(command(ffmpeg), input=audio, capture_output=True, timeout=timeout, check=True, shell=False)
+    if len(out.stdout) > MAX_WAV_BYTES:
+        raise ValueError("the voice note is longer than the cap")
     return out.stdout
 
 

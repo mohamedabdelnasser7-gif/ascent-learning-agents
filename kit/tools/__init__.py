@@ -22,6 +22,10 @@ TOOLS = {m.NAME: m for m in (store, voice_note, handoff, switch_stage)}
 # Control tools are offered in every stage where the agent replies, on top of the stage's own list.
 CONTROL = ("switch_stage",)
 
+# The only tools whose results may add amounts to the send check: they read store or delivery data.
+# A voice note or any other free text never adds an amount.
+AMOUNT_TOOLS = ("store", "delivery", "draft_order", "find_order")
+
 
 @dataclass
 class Context:
@@ -34,6 +38,7 @@ class Context:
     send: Callable[[str, str], Any] # send(to, text) on the customer's channel
     stages: dict = field(default_factory=dict)
     sent: list = field(default_factory=list)   # texts already sent to the customer this turn
+    cache: dict = field(default_factory=dict)  # per-turn results a tool keeps (the voice note, heard once)
 
 
 def offered(stage):
