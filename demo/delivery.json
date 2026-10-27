@@ -1,0 +1,8 @@
+{
+  "source": "demo data, from the 27 Oct language test",
+  "zones": [
+    {"area": "Cairo and Giza", "fee": 60, "days_min": 1, "days_max": 2},
+    {"area": "Other governorates", "fee": 85, "days_min": 2, "days_max": 4}
+  ],
+  "cash_on_delivery": true
+}
