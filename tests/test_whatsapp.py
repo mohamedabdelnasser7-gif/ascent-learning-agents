@@ -168,23 +168,67 @@ class WebhookServer(unittest.TestCase):
 
 
 class StalledBody(unittest.TestCase):
-    def test_default_socket_timeout_is_ten_seconds(self):
-        self.assertEqual(wa.make_handler(APP, VERIFY, print).timeout, 10)
+    HEAD = b"POST /webhook HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n"
 
-    def test_stalled_body_is_dropped(self):
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), wa.make_handler(APP, VERIFY, print, timeout=1))
+    def serve(self, **kw):
+        self.got = []
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), wa.make_handler(APP, VERIFY, self.got.extend, **kw))
         thread = threading.Thread(target=srv.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(thread.join, 5)
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        s = socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=4)
+        s = socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=6)
         self.addCleanup(s.close)
+        return s
+
+    def trickle(self, s, data, every=0.3):
+        """Send data a byte at a time until the server closes the connection."""
+        for b in data:
+            try:
+                s.sendall(bytes([b]))
+            except OSError:
+                return
+            time.sleep(every)
+
+    def test_defaults(self):
+        self.assertEqual(wa.make_handler(APP, VERIFY, print).timeout, 10)
+        self.assertEqual((wa.SOCKET_TIMEOUT, wa.REQUEST_DEADLINE), (10, 15))
+
+    def test_stalled_body_gets_408(self):
+        s = self.serve(timeout=1)
         start = time.monotonic()
         with self.assertLogs("channels.whatsapp", "INFO"):
-            s.sendall(b"POST /webhook HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n")
-            self.assertEqual(s.recv(1024), b"")  # closed with no reply
+            s.sendall(self.HEAD)
+            reply = s.makefile("rb").read()
+        self.assertTrue(reply.startswith(b"HTTP/1.0 408"), reply[:40])
         self.assertLess(time.monotonic() - start, 3)
+
+    def test_trickled_body_is_cut_at_the_deadline(self):
+        s = self.serve(timeout=1, deadline=2)
+        s.sendall(self.HEAD)
+        start = time.monotonic()
+        threading.Thread(target=self.trickle, args=(s, b"x" * 100), daemon=True).start()
+        with self.assertLogs("channels.whatsapp", "INFO"):
+            reply = s.makefile("rb").read()
+        self.assertTrue(reply.startswith(b"HTTP/1.0 408"), reply[:40])
+        self.assertLess(time.monotonic() - start, 4)
+
+    def test_trickled_headers_are_cut_at_the_deadline(self):
+        s = self.serve(timeout=1, deadline=2)
+        start = time.monotonic()
+        threading.Thread(target=self.trickle, args=(s, self.HEAD * 10), daemon=True).start()
+        with self.assertLogs("channels.whatsapp", "INFO"):
+            self.assertEqual(s.makefile("rb").read(), b"")  # closed with no reply
+        self.assertLess(time.monotonic() - start, 4)
+
+    def test_a_normal_request_still_works(self):
+        raw = json.dumps(payload(text_msg("wamid.9", "hi"))).encode()
+        s = self.serve(timeout=1, deadline=2)
+        s.sendall(b"POST /webhook HTTP/1.1\r\nHost: x\r\nX-Hub-Signature-256: " + wa.sign(raw, APP).encode()
+                  + b"\r\nContent-Length: " + str(len(raw)).encode() + b"\r\n\r\n" + raw)
+        self.assertTrue(s.makefile("rb").read().startswith(b"HTTP/1.0 200"))
+        self.assertEqual([i.message_id for i in self.got], ["wamid.9"])
 
 class Parsing(unittest.TestCase):
     def test_text_audio_image(self):

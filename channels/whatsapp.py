@@ -12,7 +12,9 @@ It listens on 127.0.0.1:PORT (default 8080). Meta must reach it through a public
   worker only saves the message and sends the fixed line, once per window.
 - The queue holds at most MAX_QUEUE messages. When it is full the webhook answers 503
   and forgets the id, so Meta's retry is taken later.
-- Each connection gets SOCKET_TIMEOUT seconds; a stalled body is dropped.
+- Each socket read waits at most SOCKET_TIMEOUT seconds, and the whole request must
+  arrive within REQUEST_DEADLINE seconds of the connection. A slow or stalled body gets
+  408; slow headers end the connection with no reply.
 - Media: only from Meta's media host over https, with no redirects, so the token is
   never sent anywhere else.
 
@@ -23,11 +25,13 @@ POST /{version}/{phone_number_id}/messages and GET /{version}/{media_id}?phone_n
 """
 import hashlib
 import hmac
+import io
 import json
 import logging
 import queue
 import re
 import threading
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -47,6 +51,7 @@ AUDIO_TYPES = ("audio/ogg",)            # WhatsApp voice notes: audio/ogg; codec
 MEDIA_HOSTS = ("lookaside.fbsbx.com",)  # where Graph's media urls point (checked 28 Oct 2026)
 MIN_SECRET = 32
 SOCKET_TIMEOUT = 10
+REQUEST_DEADLINE = 15
 MAX_QUEUE = 200
 REQUIRED_ENV = ("WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
                 "BASETEN_API_KEY", "OPERATOR_WHATSAPP")
@@ -249,8 +254,34 @@ def to_message(inc, graph):
 
 # server
 
-def make_handler(app_secret, verify_token, accept, phone_number_id=None, timeout=SOCKET_TIMEOUT):
-    """The request handler. accept(list of Incoming) runs only for signed, parsed bodies."""
+class DeadlineReader(io.RawIOBase):
+    """Reads one request from the socket. Each read waits at most per_read seconds, and
+    every read must end by one deadline for the whole request, so a client that sends a
+    byte at a time cannot keep the connection open."""
+
+    def __init__(self, sock, deadline, per_read=None):
+        self._sock, self._deadline, self._per_read = sock, deadline, per_read
+
+    def readable(self):
+        return True
+
+    def readinto(self, buf):
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("request deadline passed")
+        self._sock.settimeout(min(left, self._per_read) if self._per_read else left)
+        try:
+            return self._sock.recv_into(buf)
+        finally:
+            self._sock.settimeout(self._per_read)  # writes keep the normal timeout
+
+
+def make_handler(app_secret, verify_token, accept, phone_number_id=None, timeout=SOCKET_TIMEOUT,
+                 deadline=REQUEST_DEADLINE):
+    """The request handler. accept(list of Incoming) runs only for signed, parsed bodies.
+
+    timeout: seconds per socket read. deadline: seconds for the whole request to arrive.
+    """
     if not app_secret or len(app_secret) < MIN_SECRET:
         raise ValueError("WHATSAPP_APP_SECRET is missing or too short")
     if not verify_token:
@@ -259,6 +290,11 @@ def make_handler(app_secret, verify_token, accept, phone_number_id=None, timeout
     class Handler(BaseHTTPRequestHandler):
         server_version = "ascent"
         sys_version = ""
+
+        def setup(self):
+            super().setup()
+            self.rfile.close()  # the plain socket reader, replaced by one with a deadline
+            self.rfile = io.BufferedReader(DeadlineReader(self.connection, time.monotonic() + deadline, timeout))
 
         def _reply(self, code, text=""):
             body = text.encode("utf-8")
@@ -286,7 +322,12 @@ def make_handler(app_secret, verify_token, accept, phone_number_id=None, timeout
             if length < 0 or length > MAX_BODY:
                 self.close_connection = True
                 return self._reply(413, "too large")
-            raw = self.rfile.read(length)
+            try:
+                raw = self.rfile.read(length)
+            except TimeoutError:
+                log.warning("request body did not arrive in time; dropped")
+                self.close_connection = True
+                return self._reply(408, "request timeout")
             if not verify_signature(raw, self.headers.get("X-Hub-Signature-256"), app_secret):
                 return self._reply(403, "bad signature")
             try:
@@ -305,7 +346,9 @@ def make_handler(app_secret, verify_token, accept, phone_number_id=None, timeout
 
         def log_message(self, fmt, *args):
             # The default log prints the full request line, and the GET query holds the verify token.
-            log.info("%s %s", self.command, urllib.parse.urlsplit(self.path or "").path)
+            # A request cut off before its first line has no command or path yet.
+            path = urllib.parse.urlsplit(getattr(self, "path", None) or "").path
+            log.info("%s %s", getattr(self, "command", None) or "-", path)
 
     Handler.timeout = timeout  # seconds per socket read; a stalled body ends the connection
     return Handler
