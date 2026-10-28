@@ -98,6 +98,23 @@ def last_customer_text(chats, chat_id):
     return ""
 
 
+def warn_size_prices():
+    """At start: log a warning for each price or fee that is also a catalogue size number.
+
+    After is, for or ب the send check reads a size number as a size, so where prices sit
+    among the size numbers, a wrong price there can pass. Returns the numbers found.
+    """
+    try:
+        found = send_check.size_number_amounts(store.price_points(), store.size_strings())
+    except Exception:
+        log.exception("store data unavailable; prices were not checked against size numbers")
+        return []
+    if found:
+        log.warning("prices or fees that are also size numbers: %s. After is, for or ب the send check "
+                    "reads these as sizes, so a wrong price there can pass.", ", ".join(map(str, found)))
+    return found
+
+
 def turn(msg, *, chats, model, lessons, results, send, limits=None, over=None):
     """Handle one customer message. send(to, text) sends on the customer's channel.
 

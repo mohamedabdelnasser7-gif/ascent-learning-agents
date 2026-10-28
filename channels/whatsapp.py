@@ -391,6 +391,8 @@ def main():
     missing = missing_env()
     if missing:
         raise SystemExit("Missing in .env: " + ", ".join(missing))
+    from frontdesk import loop
+    loop.warn_size_prices()
     db = Db()
     pnid = env.get("WHATSAPP_PHONE_NUMBER_ID")
     graph = Graph(env.get("WHATSAPP_TOKEN"), pnid, env.get("GRAPH_API_VERSION", GRAPH_VERSION_DEFAULT))

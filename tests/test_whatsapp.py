@@ -506,6 +506,20 @@ class RequiredEnv(unittest.TestCase):
         self.assertIn("OPERATOR_WHATSAPP", str(cm.exception.code))
         server.assert_not_called()
 
+    def test_start_checks_prices_against_size_numbers(self):
+        class Stop(Exception):
+            pass
+
+        with mock.patch.dict(os.environ, self.FULL, clear=True), mock.patch("kit.env.load", return_value=[]), \
+                mock.patch("logging.basicConfig"), mock.patch.object(wa, "ThreadingHTTPServer") as server, \
+                mock.patch("frontdesk.loop.warn_size_prices", side_effect=Stop) as warn, \
+                mock.patch("kit.db.Db") as db:
+            with self.assertRaises(Stop):
+                wa.main()
+        warn.assert_called_once_with()
+        db.assert_not_called()  # the check runs right after the env check, before the database opens
+        server.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

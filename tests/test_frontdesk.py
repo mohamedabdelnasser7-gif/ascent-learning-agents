@@ -249,6 +249,27 @@ class Turns(unittest.TestCase):
         self.assertEqual(self.chats.steps(r.chat_id)[0]["media"][0]["kind"], "audio")
 
 
+class SizePriceWarning(unittest.TestCase):
+    def setUp(self):
+        clean_env(self)
+
+    def test_a_price_that_is_also_a_size_number_is_logged_at_start(self):
+        with mock.patch.object(loop.store, "price_points", return_value={45, 949}), \
+                mock.patch.object(loop.store, "size_strings", return_value=["M (EU 42-45)"]), \
+                self.assertLogs("frontdesk.loop", "WARNING") as logs:
+            self.assertEqual(loop.warn_size_prices(), [45])
+        self.assertIn("also size numbers: 45.", logs.output[0])
+
+    def test_the_demo_store_has_none(self):
+        with self.assertNoLogs("frontdesk.loop", "WARNING"):
+            self.assertEqual(loop.warn_size_prices(), [])
+
+    def test_store_errors_do_not_stop_the_start(self):
+        with mock.patch.object(loop.store, "price_points", side_effect=OSError("down")), \
+                self.assertLogs("frontdesk.loop", "ERROR"):
+            self.assertEqual(loop.warn_size_prices(), [])
+
+
 class LimitTurns(unittest.TestCase):
     def setUp(self):
         clean_env(self)
