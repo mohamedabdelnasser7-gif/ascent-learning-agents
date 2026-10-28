@@ -22,9 +22,12 @@ TOOLS = {m.NAME: m for m in (store, voice_note, handoff, switch_stage)}
 # Control tools are offered in every stage where the agent replies, on top of the stage's own list.
 CONTROL = ("switch_stage",)
 
-# The only tools whose results may add amounts to the send check: they read store or delivery data.
-# A voice note or any other free text never adds an amount.
-AMOUNT_TOOLS = ("store", "delivery", "draft_order", "find_order")
+# The only tools whose results may add amounts to the send check. store: every price comes
+# from the catalogue (Shopify or demo/catalogue.json), never from the model's arguments.
+# A new tool joins this list only in the PR that builds it, with a line here naming which of
+# its keys (price, fee, total, subtotal) the server computes. A voice note or any other free
+# text never adds an amount.
+AMOUNT_TOOLS = ("store",)
 
 
 @dataclass

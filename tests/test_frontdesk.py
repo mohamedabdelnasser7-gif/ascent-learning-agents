@@ -1,6 +1,8 @@
 import base64
+import dataclasses
 import hashlib
 import json
+import types
 import unittest
 from unittest import mock
 
@@ -145,6 +147,19 @@ class Turns(unittest.TestCase):
         results = [json.loads(s["content"]) for s in self.chats.steps(r.chat_id) if s["role"] == "tool"]
         self.assertTrue(results[0]["ok"])
         self.assertEqual(results[1], {"ok": False, "feedback": "Tool arguments must be a JSON object."})
+
+    def test_only_store_results_add_amounts(self):
+        self.assertEqual(tools.AMOUNT_TOOLS, ("store",))
+        fake = types.SimpleNamespace(
+            NAME="fake", DEFINITION={"type": "function", "function": {"name": "fake", "parameters": {}}},
+            check=lambda args, ctx: (True, ""), run=lambda args, ctx: {"ok": True, "price": 5})
+        stage = stages.STAGES["asking"]
+        wider = dataclasses.replace(stage, tools=stage.tools + ("fake",))
+        with mock.patch.dict(tools.TOOLS, {"fake": fake}), mock.patch.dict(stages.STAGES, {"asking": wider}):
+            r = self.turn(FakeModel(call("fake"), say("It costs 5 EGP."), say("I will check with the team.")),
+                          "how much?")
+        self.assertEqual((r.outcome, self.out.sent), ("replied", [(CUSTOMER, "I will check with the team.")]))
+        self.assertEqual(self.outcomes(r.chat_id), ["check_failed", "replied"])
 
     def test_one_model_error_keeps_the_stage_and_asks_again(self):
         r = self.turn(FakeModel(down), "عندكم شراب؟")
