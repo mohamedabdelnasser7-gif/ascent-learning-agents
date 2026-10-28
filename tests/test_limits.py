@@ -19,11 +19,12 @@ class LimitsTest(unittest.TestCase):
     def test_defaults_and_env(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             lim = self.make()
-        self.assertEqual((lim.per_customer, lim.window, lim.daily), (20, 600, 1000))
-        env = {"LIMIT_CUSTOMER_CALLS": "5", "LIMIT_CUSTOMER_SECONDS": "60", "LIMIT_DAILY_CALLS": "50"}
+        self.assertEqual((lim.per_customer, lim.window, lim.daily, lim.customer_daily), (20, 600, 1000, 150))
+        env = {"LIMIT_CUSTOMER_CALLS": "5", "LIMIT_CUSTOMER_SECONDS": "60", "LIMIT_DAILY_CALLS": "50",
+               "LIMIT_CUSTOMER_DAILY": "7"}
         with mock.patch.dict(os.environ, env, clear=True):
             lim = self.make()
-        self.assertEqual((lim.per_customer, lim.window, lim.daily), (5, 60, 50))
+        self.assertEqual((lim.per_customer, lim.window, lim.daily, lim.customer_daily), (5, 60, 50, 7))
         with mock.patch.dict(os.environ, {"LIMIT_CUSTOMER_CALLS": "lots"}, clear=True):
             self.assertEqual(self.make().per_customer, 20)
 
@@ -46,6 +47,23 @@ class LimitsTest(unittest.TestCase):
         self.now[0] += DAY + 1
         self.assertIsNone(lim.over("d"))
 
+    def test_one_customer_cannot_use_up_the_daily_ceiling(self):
+        lim = self.make(per_customer=2, customer_daily=3)
+        lim.take("a")
+        lim.take("a")
+        self.assertEqual(lim.over("a"), "customer")  # the 10 minute window is checked first
+        self.now[0] += 601
+        lim.take("a")
+        self.assertEqual(lim.over("a"), "customer_daily")
+        self.now[0] += 601
+        self.assertEqual(lim.over("a"), "customer_daily")
+        with self.assertRaises(OverLimit) as cm:
+            lim.take("a")
+        self.assertEqual(cm.exception.which, "customer_daily")
+        self.assertIsNone(lim.over("b"))
+        self.now[0] += DAY
+        self.assertIsNone(lim.over("a"))
+
     def test_counts_live_in_sqlite(self):
         self.make(per_customer=1).take("a")
         self.assertEqual(self.make(per_customer=1).over("a"), "customer")
@@ -58,6 +76,11 @@ class LimitsTest(unittest.TestCase):
         self.assertTrue(lim.notice_due("b", "daily"))
         self.now[0] += 601
         self.assertFalse(lim.notice_due("b", "daily"))
+        self.assertTrue(lim.notice_due("c", "customer_daily"))
+        self.now[0] += 601
+        self.assertFalse(lim.notice_due("c", "customer_daily"))
+        self.now[0] += DAY
+        self.assertTrue(lim.notice_due("c", "customer_daily"))
 
     def test_metered_model_counts_before_calling(self):
         lim = self.make(per_customer=1)
