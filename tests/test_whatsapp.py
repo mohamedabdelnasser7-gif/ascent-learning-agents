@@ -20,6 +20,9 @@ from kit import media
 from kit.chats import Chats
 from kit.db import Db
 from kit.limits import Limits
+from learning.lessons import Lessons
+from learning.results import Results
+from tests.fake_model import FakeModel, clean_env, say
 
 # Test values are made fresh on every run; none is a real key.
 APP = secrets.token_hex(20)
@@ -527,6 +530,59 @@ class Queueing(unittest.TestCase):
         self.assertEqual(app.requeue_pending(), 1)
         over, inc = app.q.get_nowait()
         self.assertEqual((over, inc.message_id, inc.text, inc.kind), (None, "m1", "hi", "text"))
+
+
+class SendingGraph(FakeGraph):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.sent = []
+
+    def send(self, to, text):
+        self.sent.append((to, text))
+        return {"ok": True}
+
+
+class WorkerTurns(unittest.TestCase):
+    """Messages through App.accept and work_one, the way the worker runs them."""
+    WHO = "201111111111"
+
+    def setUp(self):
+        clean_env(self)
+        self.db = Db(":memory:")
+        self.addCleanup(self.db.close)
+        self.chats = Chats(self.db)
+        self.graph = SendingGraph(OGG, "audio/ogg; codecs=opus")
+
+    def run_one(self, message, model=None, limits=None):
+        app = wa.App(self.chats, model or FakeModel(), Lessons(self.db), Results(self.db), self.graph, limits=limits)
+        app.accept(wa.parse(payload(message)))
+        return app.work_one(app.q.get_nowait())
+
+    def over_limit(self):
+        limits = Limits(self.db, per_customer=1, window=600, daily=100)
+        limits.take(limits_mod.key("whatsapp", self.WHO))
+        return limits
+
+    def test_an_answered_turn_leaves_nothing_pending(self):
+        r = self.run_one(text_msg("m1", "hello there, a question"), FakeModel(say("Ask me anything.")))
+        self.assertEqual(r.outcome, "replied")
+        self.assertEqual(self.chats.pending(), [])
+
+    def test_an_over_limit_turn_leaves_nothing_pending(self):
+        r = self.run_one(text_msg("m1", "hello there, a question"), limits=self.over_limit())
+        self.assertEqual(r.outcome, "limited")
+        self.assertEqual(self.chats.pending(), [])
+
+    def test_a_with_person_turn_leaves_nothing_pending(self):
+        self.chats.set_stage(self.chats.open("whatsapp", self.WHO), "with_person")
+        r = self.run_one(text_msg("m1", "hello?"))
+        self.assertEqual(r.outcome, "waiting")
+        self.assertEqual(self.chats.pending(), [])
+
+    def test_an_over_limit_voice_note_is_never_downloaded(self):
+        r = self.run_one(audio_msg("v1"), limits=self.over_limit())
+        self.assertEqual((r.outcome, self.graph.calls), ("limited", 0))
+        self.assertEqual(self.chats.pending(), [])
 
 
 class RequiredEnv(unittest.TestCase):

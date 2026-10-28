@@ -2,6 +2,7 @@ import base64
 import dataclasses
 import hashlib
 import json
+import subprocess
 import types
 import unittest
 from unittest import mock
@@ -249,6 +250,27 @@ class Turns(unittest.TestCase):
         self.assertEqual(loop.MAX_TOOL_STEPS, 4)
         self.assertEqual(len(model.calls), loop.MAX_TOOL_STEPS + 1)
         self.assertIsNone(model.calls[-1]["tools"])
+
+    def test_last_step_words_win_over_a_tool_call(self):
+        # On the last step no tools are sent; a tool call that comes back anyway is not run.
+        last = call("store", query="socks")
+        last["content"] = "Yes, we have them at 949 EGP."
+        model = FakeModel(*[call("store", query="socks") for _ in range(loop.MAX_TOOL_STEPS)], last)
+        real = tools.TOOLS["store"].run
+        with mock.patch.object(tools.TOOLS["store"], "run", side_effect=real) as runs:
+            r = self.turn(model, "socks?")
+        self.assertEqual((runs.call_count, len(model.calls)), (loop.MAX_TOOL_STEPS, loop.MAX_TOOL_STEPS + 1))
+        self.assertEqual((r.outcome, r.reply), ("replied", "Yes, we have them at 949 EGP."))
+
+    def test_a_voice_note_that_fails_is_not_converted_again(self):
+        model = FakeModel(call("voice_note"), call("voice_note"), say("Please type your message."))
+        with mock.patch.object(voice_note, "to_wav", side_effect=subprocess.TimeoutExpired("ffmpeg", 30)) as conv, \
+                self.assertLogs("kit.tools", "ERROR"):
+            r = self.turn(model, "", audio=b"OggS fake", audio_mime="audio/ogg; codecs=opus")
+        self.assertEqual((r.outcome, conv.call_count), ("replied", 1))
+        results = [json.loads(s["content"]) for s in self.chats.steps(r.chat_id) if s["role"] == "tool"]
+        self.assertEqual([x["ok"] for x in results], [False, False])
+        self.assertEqual(results[1], voice_note.NOT_HEARD)
 
     def test_photo_goes_to_the_model_and_only_its_hash_is_kept(self):
         model = FakeModel(say("aywa 3andena, b 949 geneh."))
