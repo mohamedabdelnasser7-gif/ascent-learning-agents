@@ -234,5 +234,75 @@ for _name, (_reply, _customer) in SPELLINGS.items():
     setattr(PriceSpellings, f"test_{_name}", _spelling_test(_reply, _customer))
 
 
+# Normal replies with sizes, delivery days and order numbers, run through the check the
+# way the loop runs it (store amounts, vocabulary and size strings). None names a price.
+NORMAL = (
+    ("is size 43 available?", "Your size is 43, and it is in stock."),
+    ("when will it arrive?", "It arrives in 2 days."),
+    ("where is my order?", "Order NLS0001 is on its way."),
+    ("3ndko size 43?", "el size 43 mawgood"),
+    ("delivery to Alexandria?", "Delivery to Alexandria is 2 to 3 days."),
+    ("which sizes?", "The sizes are 42, 43 and 44, all in stock."),
+    ("when does it come?", "Your order is out for delivery and arrives at 5 pm."),
+    ("can I get 2?", "Yes, your order is 2 pairs in size 43."),
+    ("size?", "Size 43 is only in black."),
+    ("is 44 there?", "44 is in stock, and delivery to Giza is 2 days."),
+    ("ordered on 25 October", "Your order from 25 October is on its way, it arrives in 2 days."),
+    ("when?", "Delivery takes 2 to 3 working days."),
+    ("do you have 43?", "Black is available in 42 and 43."),
+    ("do you have 43?", "The black ones are 42 and 43."),
+    ("do you have 43?", "We only have 43 and 44 in black."),
+    ("do you have 43?", "For 43 we have the black pair only, in stock."),
+    ("do you have 43?", "We have 43 available in black."),
+    ("el order emta yewsal?", "el order NLS0001 fel tare2 w hywsal fe 2 ayam"),
+    ("el tawseel l Alex kam yom?", "el tawseel l Alex 2 l 3 ayam"),
+    ("emta?", "hywsal fe 2 le 3 ayam"),
+    ("3ndko 43?", "el eswed mawgood b 42 w 43 bs"),
+    ("momken a3raf ma2as 44 mawgood?", "ma2as 44 mawgood, w el order hywsal fe 3 ayam"),
+    ("عندكم مقاس ٤٣؟", "مقاس ٤٣ موجود"),
+    ("الطلب هيوصل امتى؟", "الأوردر NLS0001 في الطريق وهيوصلك خلال يومين"),
+    ("التوصيل للقاهرة بياخد قد ايه؟", "التوصيل للقاهرة من ٢ لـ ٣ أيام"),
+    ("طلبي فين؟", "طلبك رقم 1042 اتشحن وهيوصل خلال ٣ أيام"),
+    ("عايز اتنين", "تمام، الأوردر بتاعك ٢ قطع مقاس ٤٣"),
+    ("عندكم ٤٣؟", "الأسود متاح ب ٤٢ و ٤٣"),
+)
+
+# Still blocked: a price word in the sentence keeps a size number an amount, and the
+# store's sizes run 30 to 52, so 1, 45 after a price word and 500 are all amounts.
+STILL_BLOCKED = (
+    ("delivery?", "Delivery to Giza is 45."),
+    ("delivery?", "Shipping to Aswan takes longer and is 45."),
+    ("delivery?", "It is 45 EGP."),
+    ("price?", "It is 1 today."),
+    ("el tawseel?", "el tawseel b 45"),
+    ("el tawseel?", "el tawseel 45 le"),
+    ("التوصيل؟", "التوصيل ب ٤٥"),
+    ("بكام؟", "سعره ٤٥"),
+)
+
+
+class NormalReplies(unittest.TestCase):
+    def setUp(self):
+        clean_env(self)
+        self.args = (store.price_points(), store.vocabulary(), store.size_strings())
+
+    def test_normal_replies_are_not_blocked(self):
+        for customer, reply in NORMAL:
+            with self.subTest(reply=reply):
+                self.assertEqual(check(reply, customer, *self.args), (True, ""))
+
+    def test_price_words_still_count_size_numbers(self):
+        for customer, reply in STILL_BLOCKED:
+            with self.subTest(reply=reply):
+                passed, fb = check(reply, customer, *self.args)
+                self.assertFalse(passed)
+                self.assertIn("not in the store or delivery data", fb)
+
+    def test_a_count_that_is_not_a_size_is_still_refused(self):
+        passed, fb = check("Only 3 left in 43.", "do you have 43?", *self.args)
+        self.assertFalse(passed)
+        self.assertIn("exact stock count", fb)
+
+
 if __name__ == "__main__":
     unittest.main()

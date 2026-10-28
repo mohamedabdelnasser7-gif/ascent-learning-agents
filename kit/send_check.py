@@ -10,8 +10,10 @@ Rules (from the store rules, the 27 Oct morning review and Mohamed's calls on 28
 4. Every number that reads as an amount must exist in the store or delivery data. A number
    reads as an amount when it sits next to a currency word or sign, or comes after a price
    word (سعر, بـ, price, costs, for, is and a few more). Sizes, size ranges, dates, order
-   numbers and numbers with a unit (days, pairs, MB) are left out. An amount written in
-   words next to a currency word is refused, so the model writes it in digits.
+   numbers and numbers with a unit (days, pairs, MB) are left out. After a weak word (is,
+   for, ب), a catalogue size number is a size unless a price word comes earlier in the
+   sentence. An amount written in words next to a currency word is refused, so the model
+   writes it in digits.
 5. No exact stock count. The store tool gives a level (in stock, few left, out), never a number.
 """
 import math
@@ -67,17 +69,24 @@ NUMBER = r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 PRICE = re.compile(
     rf"{NUMBER}\s*{CURRENCY}(?![\w])|(?<![\w]){CURRENCY}{NO_LETTER_AFTER}\s*{NUMBER}", re.IGNORECASE)
 
-# Words after which a number reads as an amount.
-CUES = (
-    r"(?:و|ف)?(?:بال|ال|ب)?سعر(?:ه|ها|هم|و)?", r"(?:و|ف)?(?:بال|ال|ب)?تمن(?:ه|ها|هم|و)?", r"بـ", r"ب",
+# Words after which a number reads as an amount. PRICE_WORDS always name money. WEAK_WORDS
+# (is, for, ب) also come before sizes, so after one of them a catalogue size number (43 from
+# "EU 42-45") is read as a size, unless a price word comes earlier in the same sentence.
+PRICE_WORDS = (
+    r"(?:و|ف)?(?:بال|ال|ب)?سعر(?:ه|ها|هم|و)?", r"(?:و|ف)?(?:بال|ال|ب)?تمن(?:ه|ها|هم|و)?",
     r"(?:و|ف)?(?:ال)?(?:شحن|توصيل|مصاريف|رسوم|اجمالي|إجمالي|مجموع|حساب)",
-    r"b", r"bi", r"be", r"(?:el\s?|b)?se3r\w*", r"(?:el\s?)?taman\w*", r"(?:el\s?)?(?:sha7n|tawsil|tawseel)",
-    r"prices?", r"priced", r"pricing", r"costs?", r"costing", r"for", r"is", r"are", r"at", r"only", r"just",
+    r"(?:el\s?|b)?se3r\w*", r"(?:el\s?)?taman\w*", r"(?:el\s?)?(?:sha7n|tawsil|tawseel)",
+    r"prices?", r"priced", r"pricing", r"costs?", r"costing",
     r"total", r"subtotal", r"fees?", r"shipping", r"delivery", r"pay", r"charged?", r"charges",
 )
+WEAK_WORDS = (r"بـ", r"ب", r"b", r"bi", r"be", r"for", r"is", r"are", r"at", r"only", r"just")
+CUES = PRICE_WORDS + WEAK_WORDS
+WEAK_CUE = re.compile("(?:" + "|".join(WEAK_WORDS) + ")", re.IGNORECASE)
+PRICE_WORD = re.compile(LETTER_BEFORE + "(?:" + "|".join(PRICE_WORDS) + ")" + NO_LETTER_AFTER, re.IGNORECASE)
+SENTENCE_END = re.compile(r"[.!?؟\n](?!\d)")
 FILLER_WORD = r"[^\s\d" + MASK + r".!?؟،,;]+"
 CUE_AMOUNT = re.compile(
-    LETTER_BEFORE + "(?:" + "|".join(CUES) + ")" + NO_LETTER_AFTER
+    LETTER_BEFORE + "(?P<cue>" + "|".join(CUES) + ")" + NO_LETTER_AFTER
     + r"(?:\s+" + FILLER_WORD + r"){0,3}?\s*[:=]?\s*(?<![\d.,])(?P<n>\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\w%])",
     re.IGNORECASE)
 
@@ -86,7 +95,10 @@ UNITS = (r"(?:days?|yom|youm|ayam|ayyam|أيام|ايام|يومين|يوم|hour
          r"|اسبوع|أسبوع|اسابيع|أسابيع|months?|شهور|شهر|minutes?|mins?|دقيقة|دقيقه|دقايق|pairs?|pieces?|pcs"
          r"|items?|قطعة|قطعه|قطع|7etta|7etat|colou?rs?|ألوان|الوان|لون|sizes?|مقاسات|cm|mm|سم|mb|ميجا|mega"
          r"|kg|كيلو|am|pm|times|مرات|مرة|مره|years?|سنين|سنة|سنه)")
-UNIT_AFTER = re.compile(rf"\s*(?:{SEP}\s*\d+\s*)?{UNITS}{NO_LETTER_AFTER}", re.IGNORECASE)
+UNIT_AFTER = re.compile(rf"\s*(?:{SEP}\s*\d+\s*)?(?:(?:working|business)\s+)?{UNITS}{NO_LETTER_AFTER}", re.IGNORECASE)
+# Franco "2 le 3 ayam" (2 to 3 days): this "le" means "to", not the currency LE.
+LE_RANGE = re.compile(rf"(?<=\d)(\s*)le(?=\s*\d+\s*(?:(?:working|business)\s+)?{UNITS}{NO_LETTER_AFTER})",
+                      re.IGNORECASE)
 
 # Numbers that are not amounts: sizes, dates and order numbers.
 SIZE_WORDS = r"(?:sizes?|مقاسات|مقاس(?:ه|ها|ك)?|المقاس|بمقاس|ma2as(?:at)?|eu)"
@@ -182,6 +194,31 @@ def _size_strings(sizes):
     return sorted(out, key=len, reverse=True)
 
 
+def _size_numbers(sizes):
+    """Whole numbers the catalogue uses as sizes: 42 to 45 from "EU 42-45", 43 from "43".
+
+    Measures like "12x8 cm" are left out.
+    """
+    out = set()
+    for s in _size_strings(sizes):
+        for a, b in re.findall(r"(?<![\dx.])(\d{1,3})\s*-\s*(\d{1,3})(?![\dx.])", s, re.IGNORECASE):
+            lo, hi = int(a), int(b)
+            if lo <= hi <= lo + 40:
+                out.update(range(lo, hi + 1))
+        for n in re.findall(r"(?<![\dx.-])(\d{1,3})(?![\dx.-])(?!\s*(?:cm|mm|سم))", s, re.IGNORECASE):
+            out.add(int(n))
+    return out
+
+
+def _weak_size(text, m, size_numbers):
+    """True when a cue match is a weak word, then a catalogue size number, with no price word
+    earlier in the same sentence ("Black is available in 42 and 43")."""
+    if _number(m.group("n")) not in size_numbers or not WEAK_CUE.fullmatch(m.group("cue")):
+        return False
+    start = max((e.end() for e in SENTENCE_END.finditer(text, 0, m.start())), default=0)
+    return PRICE_WORD.search(text, start, m.start("n")) is None
+
+
 def _mask(text, sizes=()):
     """The text with sizes, dates and order numbers replaced by MASK, so no rule reads them as amounts."""
     for s in _size_strings(sizes):
@@ -196,22 +233,29 @@ def prices_in(reply, sizes=()):
 
     A number next to a currency word or sign always counts. A number after a price word
     counts unless it is a size, a date, an order number or has a unit after it (2 days).
-    sizes: the catalogue's size strings, so "M (EU 42-45)" is never read as an amount.
+    sizes: the catalogue's size strings, so "M (EU 42-45)" is never read as an amount, and
+    a size number after a weak word ("is available in 43") is read as a size.
     """
-    text = (reply or "").translate(EASTERN_DIGITS)
+    text = LE_RANGE.sub(r"\1to", (reply or "").translate(EASTERN_DIGITS))
     out = [_number(m.group(1) or m.group(2)) for m in PRICE.finditer(text)]
     masked = _mask(PRICE.sub(MASK, text), sizes)
+    size_numbers = _size_numbers(sizes)
     for m in CUE_AMOUNT.finditer(masked):
-        if UNIT_AFTER.match(masked, m.end()):
+        if UNIT_AFTER.match(masked, m.end()) or _weak_size(masked, m, size_numbers):
             continue
         out.append(_number(m.group("n")))
     return out
 
 
 def stock_counts(reply, sizes=()):
-    """Exact stock counts stated in the reply ("3 left", "فاضل 2", "fadel 3")."""
+    """Exact stock counts stated in the reply ("3 left", "فاضل 2", "fadel 3").
+
+    A catalogue size number is a size, not a count ("43 available").
+    """
     masked = _mask((reply or "").translate(EASTERN_DIGITS), sizes)
-    return [m.group(0) for m in STOCK_COUNT.finditer(masked)]
+    size_numbers = _size_numbers(sizes)
+    return [m.group(0) for m in STOCK_COUNT.finditer(masked)
+            if not all(int(n) in size_numbers for n in re.findall(r"\d+", m.group(0)))]
 
 
 def _amount(x):
