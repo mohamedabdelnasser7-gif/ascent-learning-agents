@@ -1,9 +1,9 @@
 """Saved chats: every step of every chat, so a chat can resume and be replayed.
 
 Steps are numbered from 1 inside each chat. Besides the messages the model sees
-(user, assistant, tool), a chat holds "event" steps: stage changes and failed
-send checks. That way branch() can rebuild the stage and the failure count at
-any step.
+(user, assistant, tool), a chat holds "event" steps: stage changes, failed send
+checks and model errors. That way branch() can rebuild the stage and both counts
+at any step.
 
 Media bytes are never stored, only a sha256 and the mime type.
 
@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS chats (
   parent_id TEXT,
   branched_at INTEGER,
   created_at REAL NOT NULL,
-  updated_at REAL NOT NULL
+  updated_at REAL NOT NULL,
+  model_errors INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS chats_customer ON chats (channel, customer_id, parent_id);
 CREATE TABLE IF NOT EXISTS steps (
@@ -51,7 +52,10 @@ CREATE TABLE IF NOT EXISTS seen_messages (
   attempts INTEGER NOT NULL DEFAULT 0
 );
 """
-# Columns added to seen_messages after the first live tests, for databases made before them.
+# Columns added after the first live tests, for databases made before them.
+CHAT_COLUMNS = (
+    ("model_errors", "INTEGER NOT NULL DEFAULT 0"),
+)
 SEEN_COLUMNS = (
     ("status", "TEXT NOT NULL DEFAULT 'done'"),
     ("payload", "TEXT"),
@@ -67,10 +71,11 @@ class Chats:
         self.db = db if db is not None else Db()
         self.db.script(SCHEMA)
         with self.db.tx() as c:
-            have = {r[1] for r in c.execute("PRAGMA table_info(seen_messages)")}
-            for name, decl in SEEN_COLUMNS:
-                if name not in have:
-                    c.execute(f"ALTER TABLE seen_messages ADD COLUMN {name} {decl}")
+            for table, columns in (("chats", CHAT_COLUMNS), ("seen_messages", SEEN_COLUMNS)):
+                have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+                for name, decl in columns:
+                    if name not in have:
+                        c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     # chats
 
@@ -84,11 +89,13 @@ class Chats:
                 return row["id"]
             return self._new(c, channel, customer_id)
 
-    def _new(self, c, channel, customer_id, stage=FIRST_STAGE, failed=0, parent=None, at_step=None):
+    def _new(self, c, channel, customer_id, stage=FIRST_STAGE, failed=0, parent=None, at_step=None,
+             model_errors=0):
         chat_id = uuid.uuid4().hex
         now = time.time()
-        c.execute("INSERT INTO chats VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  (chat_id, channel, customer_id, stage, failed, parent, at_step, now, now))
+        c.execute("INSERT INTO chats (id, channel, customer_id, stage, failed_checks, model_errors, parent_id, "
+                  "branched_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  (chat_id, channel, customer_id, stage, failed, model_errors, parent, at_step, now, now))
         return chat_id
 
     def get(self, chat_id):
@@ -127,6 +134,25 @@ class Chats:
                             (time.time(), chat_id))
             if cur.rowcount:
                 self._add(c, chat_id, "event", content=json.dumps({"checks_reset": True}))
+
+    def model_errors(self, chat_id):
+        return self.get(chat_id)["model_errors"]
+
+    def add_model_error(self, chat_id, reason):
+        """Count one model error in a row in this chat. Returns the new count."""
+        with self.db.tx() as c:
+            c.execute("UPDATE chats SET model_errors = model_errors + 1, updated_at = ? WHERE id = ?",
+                      (time.time(), chat_id))
+            self._add(c, chat_id, "event", content=json.dumps({"model_error": reason}, ensure_ascii=False))
+            return c.execute("SELECT model_errors FROM chats WHERE id = ?", (chat_id,)).fetchone()[0]
+
+    def reset_model_errors(self, chat_id):
+        """After a reply passes, the count starts again. Recorded as an event when it was not 0."""
+        with self.db.tx() as c:
+            cur = c.execute("UPDATE chats SET model_errors = 0, updated_at = ? WHERE id = ? AND model_errors > 0",
+                            (time.time(), chat_id))
+            if cur.rowcount:
+                self._add(c, chat_id, "event", content=json.dumps({"model_errors_reset": True}))
 
     # steps
 
@@ -195,12 +221,12 @@ class Chats:
     def branch(self, chat_id, at_step):
         """Copy the chat up to and including step `at_step` into a new chat.
 
-        The original is left untouched. The copy's stage and failed-check count
-        are rebuilt from the event steps it carries.
+        The original is left untouched. The copy's stage, failed-check count and
+        model error count are rebuilt from the event steps it carries.
         """
         src = self.get(chat_id)
         steps = self.steps(chat_id, upto=at_step)
-        stage, failed = FIRST_STAGE, 0
+        stage, failed, model_errors = FIRST_STAGE, 0, 0
         for s in steps:
             if s["role"] == "event":
                 ev = json.loads(s["content"])
@@ -210,8 +236,13 @@ class Chats:
                     failed += 1
                 if "checks_reset" in ev:
                     failed = 0
+                if "model_error" in ev:
+                    model_errors += 1
+                if "model_errors_reset" in ev:
+                    model_errors = 0
         with self.db.tx() as c:
-            new_id = self._new(c, src["channel"], src["customer_id"], stage, failed, chat_id, at_step)
+            new_id = self._new(c, src["channel"], src["customer_id"], stage, failed, chat_id, at_step,
+                               model_errors)
             for s in steps:
                 c.execute("INSERT INTO steps VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (
                     new_id, s["n"], s["role"], s["content"],

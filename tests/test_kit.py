@@ -247,6 +247,36 @@ class SeenAndChecksTest(unittest.TestCase):
         self.assertEqual(self.chats.failed_checks(self.chats.branch(cid, len(self.chats.steps(cid)))), 1)
 
 
+    def test_model_errors_reset_and_branch_follows(self):
+        cid = self.chats.open("whatsapp", "2013")
+        self.chats.add_step(cid, "user", content="hi")
+        self.assertEqual(self.chats.add_model_error(cid, "Baseten call failed: URLError"), 1)
+        self.assertEqual(self.chats.add_model_error(cid, "Baseten call failed: HTTP 429"), 2)
+        at_two = len(self.chats.steps(cid))
+        self.chats.reset_model_errors(cid)
+        self.chats.reset_model_errors(cid)  # no second event when already 0
+        self.chats.add_model_error(cid, "Baseten call failed: URLError")
+        self.assertEqual(self.chats.model_errors(cid), 1)
+        events = [s["content"] for s in self.chats.steps(cid) if s["role"] == "event"]
+        self.assertEqual(sum('"model_errors_reset"' in e for e in events), 1)
+        self.assertEqual(self.chats.model_errors(self.chats.branch(cid, len(self.chats.steps(cid)))), 1)
+        self.assertEqual(self.chats.model_errors(self.chats.branch(cid, at_two)), 2)
+        self.assertEqual(self.chats.failed_checks(cid), 0)
+
+    def test_old_chats_table_gets_the_model_error_count(self):
+        db = Db(":memory:")
+        self.addCleanup(db.close)
+        db.script("CREATE TABLE chats (id TEXT PRIMARY KEY, channel TEXT NOT NULL, customer_id TEXT NOT NULL, "
+                  "stage TEXT NOT NULL DEFAULT 'asking', failed_checks INTEGER NOT NULL DEFAULT 0, parent_id TEXT, "
+                  "branched_at INTEGER, created_at REAL NOT NULL, updated_at REAL NOT NULL);"
+                  "INSERT INTO chats VALUES ('old', 'whatsapp', '2014', 'asking', 0, NULL, NULL, 1.0, 1.0);")
+        chats = Chats(db)
+        self.assertEqual(chats.model_errors("old"), 0)
+        cid = chats.open("whatsapp", "2015")
+        self.assertEqual((chats.add_model_error(cid, "x"), chats.stage(cid), chats.failed_checks(cid)), (1, "asking", 0))
+        self.assertEqual(chats.get(chats.branch(cid, 1))["model_errors"], 1)
+
+
 class StoreTest(unittest.TestCase):
     def setUp(self):
         clean_env(self)

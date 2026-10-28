@@ -9,7 +9,9 @@
    with the check's feedback. After 3 failed checks in a row in a chat, handoff runs
    (three refusals, then a person, as in Meta's legal-agent-workshop). A reply that
    passes starts the count again.
-5. When the model is down, handoff runs. Over a model call limit, the customer gets one
+5. When the model is down, the customer gets one fixed line and the chat keeps its
+   stage. After MAX_MODEL_ERRORS model errors in a row in a chat, handoff runs. A reply
+   that passes starts the count again. Over a model call limit, the customer gets one
    fixed line, once per window.
 6. Every outcome goes to the result log.
 
@@ -33,6 +35,7 @@ INSTRUCTIONS = (Path(__file__).parent / "instructions.md").read_text(encoding="u
 MAX_TOOL_STEPS = 4
 MAX_CALLS_PER_STEP = 3
 MAX_FAILED_CHECKS = 3
+MAX_MODEL_ERRORS = 2
 
 PHOTO_NOT_OPENED = {
     "arabic": "مش قادر أفتح الصورة دي. ابعتها تاني صورة عادية وحجمها أقل من 5 ميجا.",
@@ -49,6 +52,11 @@ LIMIT_LINE = {
     "franco": "wasalna rasayel kteer f wa2t 2osayar, fa msh ha2dar arod delwa2ty. eb3atlna tany kman shwaya.",
     "english": "We got a lot of messages in a short time, so I can't answer right now. Please write again in a little while.",
 }
+MODEL_DOWN = {
+    "arabic": "مش قادر أرد دلوقتي. ابعتلي رسالتك تاني كمان كام دقيقة.",
+    "franco": "msh 2ader arod delwa2ty. momken teb3atli resaltak tany kman kam di2i2a?",
+    "english": "I can't answer right now. Please write again in a few minutes.",
+}
 VOICE_NOTE = "(The customer sent a voice note. Call voice_note to hear it.)"
 PHOTO_ONLY = "(The customer sent a photo.)"
 RETRY = "(Store check, not from the customer.) Your last reply was not sent. {feedback} Write the reply again."
@@ -58,7 +66,7 @@ TOO_MANY_CALLS = {"ok": False, "feedback": f"At most {MAX_CALLS_PER_STEP} tool c
 @dataclass
 class TurnResult:
     chat_id: str
-    outcome: str          # replied, handed_off, limited, or waiting (a person has the chat)
+    outcome: str          # replied, handed_off, limited, model_error, or waiting (a person has the chat)
     reply: str | None = None
 
 
@@ -173,8 +181,7 @@ def turn(msg, *, chats, model, lessons, results, send, limits=None, over=None):
         return _limited(chat_id, ctx.stage, msg, t.customer_text, e.which, chats=chats, results=results, send=send,
                         limits=limits)
     except ModelError as e:
-        log.warning("model error, handing the chat to a person: %s", e)
-        return _hand_off(t, results, "the model is not answering", {"by": "model_error"})
+        return _model_error(t, msg, e, results=results, send=send)
 
 
 def _answer(t, convo, msg, vocab, sizes, *, results, send):
@@ -191,6 +198,7 @@ def _answer(t, convo, msg, vocab, sizes, *, results, send):
             send(msg.customer_id, reply)
             n = ctx.chats.add_step(chat_id, "assistant", content=reply)
             ctx.chats.reset_failed_checks(chat_id)
+            ctx.chats.reset_model_errors(chat_id)
             results.record(chat_id, "replied", step=n, stage=ctx.stage.name, lessons=t.lesson_ids,
                            detail={"tool_steps": t.tool_steps})
             return TurnResult(chat_id, "replied", reply)
@@ -213,6 +221,23 @@ def _hand_off(t, results, reason, detail):
     results.record(ctx.chat_id, "handed_off", stage=stage.name, lessons=t.lesson_ids,
                    detail={**detail, "ok": bool(out.get("ok"))})
     return TurnResult(ctx.chat_id, "handed_off", ctx.sent[-1] if ctx.sent else None)
+
+
+def _model_error(t, msg, error, *, results, send):
+    """The model did not answer: one fixed line, and the chat keeps its stage. The
+    MAX_MODEL_ERRORS-th model error in a row in this chat hands it to a person."""
+    ctx = t.ctx
+    n = ctx.chats.add_model_error(ctx.chat_id, str(error))
+    if n >= MAX_MODEL_ERRORS:
+        log.warning("model error %d in a row, handing the chat to a person: %s", n, error)
+        return _hand_off(t, results, "the model is not answering", {"by": "model_error", "in_a_row": n})
+    log.warning("model error %d in a row, the customer was asked to write again: %s", n, error)
+    line = MODEL_DOWN[send_check.detect_script(t.customer_text) or "arabic"]
+    send(msg.customer_id, line)
+    step = ctx.chats.add_step(ctx.chat_id, "assistant", content=line)
+    results.record(ctx.chat_id, "model_error", step=step, stage=ctx.stage.name, lessons=t.lesson_ids,
+                   detail={"in_a_row": n})
+    return TurnResult(ctx.chat_id, "model_error", line)
 
 
 def _limited(chat_id, stage, msg, customer_text, which, *, chats, results, send, limits):

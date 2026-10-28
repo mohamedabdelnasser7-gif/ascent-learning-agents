@@ -2,7 +2,7 @@ import unittest
 from decimal import Decimal
 from unittest import mock
 
-from frontdesk.loop import LIMIT_LINE, PHOTO_NOT_OPENED, VOICE_NOT_HEARD
+from frontdesk.loop import LIMIT_LINE, MODEL_DOWN, PHOTO_NOT_OPENED, VOICE_NOT_HEARD
 from kit.send_check import amounts_in, check, detect_script, prices_in, size_number_amounts, stock_counts
 from kit.tools import store
 from kit.tools.handoff import TAKING_OVER
@@ -105,6 +105,7 @@ class SendCheck(unittest.TestCase):
             self.assertTrue(self.ok(TAKING_OVER[script], customer)[0], script)
             self.assertTrue(self.ok(VOICE_NOT_HEARD[script], customer)[0], script)
             self.assertTrue(self.ok(LIMIT_LINE[script], customer)[0], script)
+            self.assertTrue(self.ok(MODEL_DOWN[script], customer)[0], script)
 
     # Mohamed's calls, 28 Oct
 

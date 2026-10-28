@@ -22,6 +22,13 @@ OPERATOR = "201000000001"
 JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 4
 
 
+MODEL_DOWN_AR = loop.MODEL_DOWN["arabic"]
+
+
+def down(messages, tools_sent):
+    raise ModelError("Baseten call failed: URLError")
+
+
 class StageTools(unittest.TestCase):
     def test_grid_is_the_approved_layout(self):
         self.assertEqual(stages.GRID, {
@@ -139,17 +146,33 @@ class Turns(unittest.TestCase):
         self.assertTrue(results[0]["ok"])
         self.assertEqual(results[1], {"ok": False, "feedback": "Tool arguments must be a JSON object."})
 
-    def test_model_down_hands_off(self):
+    def test_one_model_error_keeps_the_stage_and_asks_again(self):
+        r = self.turn(FakeModel(down), "عندكم شراب؟")
+        self.assertEqual((r.outcome, r.reply, self.chats.stage(r.chat_id)), ("model_error", MODEL_DOWN_AR, "asking"))
+        self.assertEqual(self.out.sent, [(CUSTOMER, MODEL_DOWN_AR)])
+        self.assertEqual(self.chats.model_errors(r.chat_id), 1)
+        row = self.results.for_chat(r.chat_id)[-1]
+        self.assertEqual((row["outcome"], row["detail"], row["stage"]), ("model_error", {"in_a_row": 1}, "asking"))
+        self.assertEqual(self.chats.steps(r.chat_id)[-1]["content"], MODEL_DOWN_AR)
+
+    def test_two_model_errors_in_a_row_hand_off(self):
         clean_env(self, OPERATOR_WHATSAPP=OPERATOR)
-
-        def down(messages, tools_sent):
-            raise ModelError("Baseten call failed: URLError")
-
+        self.assertEqual(self.turn(FakeModel(down), "عندكم شراب؟").outcome, "model_error")
         r = self.turn(FakeModel(down, down), "عندكم شراب؟")
         self.assertEqual((r.outcome, self.chats.stage(r.chat_id)), ("handed_off", "with_person"))
-        self.assertEqual([t for to, t in self.out.sent if to == CUSTOMER], [TAKING_OVER["arabic"]])
+        self.assertEqual([t for to, t in self.out.sent if to == CUSTOMER], [MODEL_DOWN_AR, TAKING_OVER["arabic"]])
         row = self.results.for_chat(r.chat_id)[-1]
-        self.assertEqual((row["outcome"], row["detail"]["by"]), ("handed_off", "model_error"))
+        self.assertEqual((row["outcome"], row["detail"]["by"], row["detail"]["in_a_row"]),
+                         ("handed_off", "model_error", 2))
+
+    def test_a_passing_reply_starts_the_model_error_count_again(self):
+        self.assertEqual(self.turn(FakeModel(down), "hello there, a question").outcome, "model_error")
+        r = self.turn(FakeModel(say("Ask me anything.")), "hello there, a question")
+        self.assertEqual((r.outcome, self.chats.model_errors(r.chat_id)), ("replied", 0))
+        r = self.turn(FakeModel(down), "hello there, a question")
+        self.assertEqual((r.outcome, self.chats.stage(r.chat_id)), ("model_error", "asking"))
+        self.assertEqual(self.results.for_chat(r.chat_id)[-1]["detail"], {"in_a_row": 1})
+        self.assertEqual(self.out.sent[-1], (CUSTOMER, loop.MODEL_DOWN["english"]))
 
     def test_voice_note_that_failed_to_download(self):
         model = FakeModel()
