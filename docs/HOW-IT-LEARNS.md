@@ -12,6 +12,8 @@ The product is the learning layer. Every agent writes to it and reads from it, a
 
 **Morning review (about 10 minutes).** Coming: the agent picks about 10 replies. The owner marks each one Good or Fix, with one line on why, and says yes, no or modify to the idea cards. Fixes become tone lessons. Small tone fixes go in after the checks. Prices, policies and promises wait for the owner's yes.
 
+**Weekly review (about 15 minutes).** Coming: each lesson that was live this week, with its delivered and refused results; the owner keeps it, pulls it, or makes it a rule. Plus findings from the week's chats for the owner to act on, such as how long delivery really takes per area compared with the stated policy.
+
 ## Three stages, from reading lessons to knowing them
 
 | Stage | What it does | How it is proven | Status |
