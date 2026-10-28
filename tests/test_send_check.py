@@ -1,7 +1,9 @@
 import unittest
+from decimal import Decimal
+from unittest import mock
 
 from frontdesk.loop import LIMIT_LINE, PHOTO_NOT_OPENED, VOICE_NOT_HEARD
-from kit.send_check import amounts_in, check, detect_script, prices_in, stock_counts
+from kit.send_check import amounts_in, check, detect_script, prices_in, size_number_amounts, stock_counts
 from kit.tools import store
 from kit.tools.handoff import TAKING_OVER
 from tests.fake_model import clean_env
@@ -210,6 +212,14 @@ SPELLINGS = {
     "be_eastern_geem": ("ده بـ ٥٠٠ ج", HOODIE_AR),
     "be_attached": ("ده ب500 بس", HOODIE_AR),
     "franco_b": ("el hoodie b 500 bs", "3ndko hoodie eswed?"),
+    # No price word before the number, and only 1 digit, so only the currency list can catch these.
+    "no_cue_geneha": ("الهودي الاسود 1 جنيها", HOODIE_AR),
+    "no_cue_geneha_tanween_after_alif": ("الهودي الاسود 1 جنيهاً", HOODIE_AR),
+    "no_cue_geneha_tanween_before_alif": ("الهودي الاسود 1 جنيهًا", HOODIE_AR),
+    "no_cue_bare_geem": ("الهودي الاسود ١ ج", HOODIE_AR),
+    "no_cue_geem_meem": ("الهودي الاسود 1 جم", HOODIE_AR),
+    "no_cue_egyptian_pounds": ("Black hoodie: 1 Egyptian pounds.", HOODIE_EN),
+    "no_cue_pound_sign": ("Black hoodie: £1.", HOODIE_EN),
 }
 
 
@@ -265,6 +275,55 @@ NORMAL = (
     ("طلبي فين؟", "طلبك رقم 1042 اتشحن وهيوصل خلال ٣ أيام"),
     ("عايز اتنين", "تمام، الأوردر بتاعك ٢ قطع مقاس ٤٣"),
     ("عندكم ٤٣؟", "الأسود متاح ب ٤٢ و ٤٣"),
+    # A bare number of 3 or more digits is an amount (28 Oct), but order numbers with #,
+    # Egyptian phone numbers, years with a year word or month, times, percentages and
+    # product codes still pass.
+    ("where is my order?", "Your order #10234 is with the courier."),
+    ("الاوردر فين؟", "الأوردر #1042 اتشحن وهيوصل بكرة"),
+    ("el order fen?", "el order #1042 etsha7an w hywsal bokra"),
+    ("what is your number?", "Call us on 01012345678."),
+    ("what is your number?", "Our WhatsApp is +20 10 1234 5678."),
+    ("what is your number?", "Write to 00201012345678 or +201012345678."),
+    ("رقمكم كام؟", "كلمنا على ٠١٠١٢٣٤٥٦٧٨"),
+    ("momken rakamko? 3ayez akalemko", "kalemna 3la 010 1234 5678"),
+    ("since when?", "We have sold these socks since May 2019."),
+    ("is it new?", "This is the 2026 model."),
+    ("موديل سنة كام؟", "ده موديل 2026"),
+    ("اتعمل امتى؟", "ده اتعمل سنة ٢٠٢٤"),
+    ("el model bta3 sana kam?", "el model 2026 mawgood"),
+    ("when will it come?", "It arrives on Oct 30, 2026."),
+    ("when do you answer?", "We answer from 10:00 to 22:00."),
+    ("بتردوا امتى؟", "بنرد من الساعة ٩:٣٠ لحد ١٠:٠٠ بالليل"),
+    ("what are they made of?", "They are 100% cotton."),
+    ("which one?", "Code BO-2936845 is in stock."),
+    ("how much?", "The black socks, 949."),
+    ("how much?", "They are 949.00 EGP."),
+)
+
+# Mohamed's call, 28 Oct: a standalone number of 3 or more digits is an amount, with or
+# without a currency or price word, and a unit after it does not change that.
+BARE_BLOCKED = (
+    ("how much?", "Hoodie: 500."),
+    ("بكام؟", "الهودي ٥٠٠ بس"),
+    ("el hoodie b kam ya basha?", "el hoodie 500 bas"),
+    ("how much?", "The black socks, 500."),
+    ("how much?", "Black socks 500 only today"),
+    ("el socks b kam ya basha?", "el socks 500 bs ya basha"),
+    ("بكام؟", "الكوتشي 500 بس"),
+    ("بكام؟", "ده ٥٠٠ بس"),
+    ("delivery?", "Shipping 500 le 2 days."),
+    ("el tawseel b kam ya basha?", "el tawseel 500 le 3 ayam"),
+    ("how long?", "You pay for 500 working days."),
+    ("how long?", "It is 700 business days."),
+    ("how much?", "Hoodie: 1,500."),
+    ("how much?", "Socks 649-700."),
+    ("size 43?", "Size 43, 500."),
+    ("how much?", "It is 2000."),
+    # A 4 digit number from 1900 to 2099 is a year only with a year word or a month next
+    # to it, or inside a date (Mohamed, 28 Oct). Anything else is an amount.
+    ("how much?", "Hoodie: 1999."),
+    ("since when?", "We have sold these socks since 2019."),
+    ("is it new?", "Yes, the 2026 collection is in stock."),
 )
 
 # Still blocked: a price word in the sentence keeps a size number an amount, and the
@@ -302,6 +361,69 @@ class NormalReplies(unittest.TestCase):
         passed, fb = check("Only 3 left in 43.", "do you have 43?", *self.args)
         self.assertFalse(passed)
         self.assertIn("exact stock count", fb)
+
+    def test_bare_numbers_of_three_digits_are_amounts(self):
+        for customer, reply in BARE_BLOCKED:
+            with self.subTest(reply=reply):
+                passed, fb = check(reply, customer, *self.args)
+                self.assertFalse(passed)
+                self.assertIn("not in the store or delivery data", fb)
+        self.assertEqual(len(NORMAL), 48)  # the 28 from round 2, plus 20 for the bare number and year rules
+
+
+class NumbersAsWritten(unittest.TestCase):
+    def setUp(self):
+        clean_env(self)
+
+    def test_decimals_count_as_written(self):
+        self.assertEqual(prices_in("It is 649.99 EGP."), [Decimal("649.99")])
+        self.assertEqual(prices_in("الشراب ٦٤٩٫٩٩ جنيه"), [Decimal("649.99")])
+        self.assertFalse(check("It is 649.99 EGP.", EN, {649, 949})[0])
+        self.assertFalse(check("The price is 649.99", EN, {649})[0])
+        self.assertTrue(check("It is 949.00 EGP.", EN, {949})[0])
+        self.assertTrue(check("It is 949.50 EGP.", EN, {"949.50"})[0])
+        self.assertFalse(check("It is 949 EGP.", EN, {"949.50"})[0])
+        self.assertEqual(amounts_in({"price": "949.50", "fee": 60.0}), {Decimal("949.5"), 60})
+
+    def test_store_prices_keep_their_fractions(self):
+        items = [{"title": "T", "variants": [{"size": "M", "price": "949.50"}, {"size": "L", "price": "949.00"}]}]
+        with mock.patch.object(store, "catalogue", return_value=items):
+            points = store.price_points()
+        self.assertEqual(points, {Decimal("949.5"), 949, 60, 85})  # 60 and 85: the demo delivery fees
+
+    def test_amounts_with_k_are_refused(self):
+        for reply in ("It costs 1k EGP.", "Only 1.5k.", "EGP 2k", "The price is 1k"):
+            with self.subTest(reply=reply):
+                passed, fb = check(reply, EN, store.price_points())
+                self.assertFalse(passed)
+                self.assertIn("digits", fb)
+        self.assertTrue(check("We have 1k followers on Instagram.", EN, store.price_points())[0])
+
+    def test_a_size_string_never_hides_part_of_a_bigger_number(self):
+        self.assertEqual(prices_in("The hoodie is 430.", sizes=("43",)), [430])
+        self.assertEqual(prices_in("Hoodie: 1430.", sizes=("43",)), [1430])
+        self.assertEqual(prices_in("Size 43 is in stock.", sizes=("43",)), [])
+
+    def test_a_size_list_goes_on_only_with_small_numbers(self):
+        self.assertEqual(prices_in("Sizes 42, 43 and 44 are in stock."), [])
+        self.assertEqual(prices_in("Size 43, 500."), [500])
+
+    def test_phones_codes_and_years_with_a_year_word_are_not_amounts(self):
+        for reply in ("01012345678", "+20 10 1234 5678", "00201012345678", "201012345678", "+20 2 2345 6789",
+                      "BO-2936845", "NLS0001", "100%", "١٠٠٪", "model 2019", "the 2019 model", "Model: 2026",
+                      "سنة ٢٠١٩", "موديل 2026", "el model 2026", "May 2019", "30 Oct 2026", "Oct 30, 2026",
+                      "٢٨ أكتوبر ٢٠٢٦", "28/10/2026", "2026-10-28", "2026/10/28"):
+            with self.subTest(reply=reply):
+                self.assertEqual(prices_in(reply), [])
+        for reply, n in (("01012345", 1012345), ("1999.5", Decimal("1999.5")), ("2,019", 2019), ("2100", 2100),
+                         ("since 2019", 2019), ("Hoodie: 1999.", 1999), ("the 2026 collection", 2026),
+                         ("1999 years", 1999), ("Price is 1999, model 2026.", 1999)):
+            with self.subTest(reply=reply):
+                self.assertEqual(prices_in(reply), [n])
+
+    def test_size_numbers_that_are_also_prices(self):
+        self.assertEqual(size_number_amounts({45, 949, "60"}, ("M (EU 42-45)", "Kids 60")), [45, 60])
+        self.assertEqual(size_number_amounts(store.price_points(), store.size_strings()), [])
 
 
 if __name__ == "__main__":

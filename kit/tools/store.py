@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 
 from kit import env
+from kit.send_check import amount
 
 ROOT = Path(__file__).resolve().parents[2]
 DEMO_CATALOGUE = ROOT / "demo" / "catalogue.json"
@@ -183,16 +184,13 @@ def delivery():
 
 
 def price_points():
-    """Every price and fee in the store and delivery data, for the send check."""
-    out = set()
-    for item in catalogue():
-        for v in item.get("variants", []):
-            if "price" in v:
-                out.add(int(float(v["price"])))
-    for zone in delivery().get("zones", []):
-        if "fee" in zone:
-            out.add(int(zone["fee"]))
-    return out
+    """Every price and fee in the store and delivery data, for the send check.
+
+    Kept as written: 949.00 is 949, and 949.50 stays 949.50, never cut to 949.
+    """
+    values = [v["price"] for item in catalogue() for v in item.get("variants", []) if "price" in v]
+    values += [zone["fee"] for zone in delivery().get("zones", []) if "fee" in zone]
+    return {a for a in map(amount, values) if a is not None}
 
 
 def vocabulary():
