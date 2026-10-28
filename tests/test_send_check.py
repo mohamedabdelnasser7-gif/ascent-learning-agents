@@ -376,6 +376,19 @@ class NumbersAsWritten(unittest.TestCase):
     def setUp(self):
         clean_env(self)
 
+    def test_emphasis_marks_and_invisible_characters_do_not_hide_an_amount(self):
+        # Red team round 3: WhatsApp shows _500_ as an italic 500, and a zero width space splits 500.
+        for customer, reply in (
+                (EN, "The price is _500_ EGP."), (EN, "The black socks, ~500~."), (EN, "It is `500` EGP."),
+                ("بكام الشراب؟", "الكوتشي _500_ جنيه"), ("bkam el socks?", "el sha7n _70_ gneh"),
+                (EN, "Black socks 5\u200b00."), ("بكام الكوتشي؟", "الكوتشي ٥\u200d٠٠")):
+            with self.subTest(reply=reply):
+                passed, fb = check(reply, customer, store.price_points())
+                self.assertFalse(passed)
+                self.assertIn("not in the store or delivery data", fb)
+        self.assertTrue(check("The black socks are _649 EGP_.", EN, store.price_points())[0])
+        self.assertFalse(check("el socks b meteen geneh", "bkam el socks?", store.price_points())[0])
+
     def test_decimals_count_as_written(self):
         self.assertEqual(prices_in("It is 649.99 EGP."), [Decimal("649.99")])
         self.assertEqual(prices_in("الشراب ٦٤٩٫٩٩ جنيه"), [Decimal("649.99")])

@@ -24,6 +24,7 @@ Rules (from the store rules, the 27 Oct morning review and Mohamed's calls on 28
 """
 import math
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 
 # Arabic letters only: Arabic punctuation and digits do not count as a script.
@@ -32,6 +33,8 @@ LATIN = re.compile(r"[A-Za-z]")
 WORD = re.compile(r"[\w\u0600-\u06ff]+", re.UNICODE)
 # Eastern digits, and the Arabic decimal and thousands signs (٩٤٩٫٥٠ is 949.50).
 EASTERN_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫٬", "01234567890123456789.,")
+# WhatsApp emphasis marks (_italic_, *bold*, ~strike~, `mono`). WhatsApp shows _500_ as 500.
+EMPHASIS = re.compile(r"[_*~`]")
 
 # Franco: Egyptian Arabic in Latin letters, with 2 3 5 7 8 9 standing for Arabic sounds.
 FRANCO_DIGIT_WORD = re.compile(r"\b(?=[a-z0-9]*[a-z])(?=[a-z0-9]*[235789])[a-z0-9]{2,}\b")
@@ -151,7 +154,7 @@ ORDER_NUMBER = re.compile(
 
 # An amount written in words next to a currency word cannot be checked, so it is refused.
 NUMBER_WORDS = (r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty"
-                r"|fifty|sixty|seventy|eighty|ninety|hundred|thousand|alf|meya|mya|mit|واحد|اتنين|اثنين|تلاتة|ثلاثة"
+                r"|fifty|sixty|seventy|eighty|ninety|hundred|thousand|alf|meya|mya|meteen|metein|mitein|mit|واحد|اتنين|اثنين|تلاتة|ثلاثة"
                 r"|اربعة|أربعة|خمسة|ستة|سبعة|تمانية|ثمانية|تسعة|عشرة|عشرين|تلاتين|ثلاثين|اربعين|أربعين|خمسين"
                 r"|ستين|سبعين|تمانين|ثمانين|تسعين|مية|ميه|مائة|ميت|ميتين|الف|ألف|آلاف|الاف|تلاف)")
 SPELLED_AMOUNT = re.compile(rf"{NUMBER_WORDS}\s*{CURRENCY}(?![\w])", re.IGNORECASE)
@@ -218,6 +221,13 @@ def _script_feedback(reply, customer_text, vocabulary):
         if looks_franco(reply):
             return "The customer wrote in English. Reply in plain English, not Franco."
     return None
+
+
+def _plain(text):
+    """The reply as the number rules read it: Western digits, no invisible format characters
+    (a zero width space splits 500 into 5 and 00), and emphasis marks as spaces (_500_ is 500)."""
+    text = "".join(ch for ch in (text or "") if unicodedata.category(ch) != "Cf")
+    return EMPHASIS.sub(" ", text.translate(EASTERN_DIGITS))
 
 
 def _number(raw):
@@ -291,7 +301,7 @@ def prices_in(reply, sizes=()):
     sizes: the catalogue's size strings, so "M (EU 42-45)" is never read as an amount, and
     a size number after a weak word ("is available in 43") is read as a size.
     """
-    text = LE_RANGE.sub(r"\1to", (reply or "").translate(EASTERN_DIGITS))
+    text = LE_RANGE.sub(r"\1to", _plain(reply))
     out = [_number(m.group(1) or m.group(2)) for m in PRICE.finditer(text)]
     masked = _mask(PRICE.sub(MASK, text), sizes)
     size_numbers = _size_numbers(sizes)
@@ -324,7 +334,7 @@ def stock_counts(reply, sizes=()):
 
     A catalogue size number is a size, not a count ("43 available").
     """
-    masked = _mask((reply or "").translate(EASTERN_DIGITS), sizes)
+    masked = _mask(_plain(reply), sizes)
     size_numbers = _size_numbers(sizes)
     return [m.group(0) for m in STOCK_COUNT.finditer(masked)
             if not all(int(n) in size_numbers for n in re.findall(r"\d+", m.group(0)))]
@@ -416,7 +426,7 @@ def check(reply, customer_text="", amounts=(), vocabulary=frozenset(), sizes=())
         problems.append(f"These amounts are not in the store or delivery data: {nums}. "
                         "Use only prices and fees from tool results, or say you will check with the team. "
                         "If a number is not a price, say what it is: size 43, 2 days, order #1234, model 2026.")
-    digits = reply.translate(EASTERN_DIGITS)
+    digits = _plain(reply)
     if SPELLED_AMOUNT.search(digits) or SHORT_AMOUNT.search(digits):
         problems.append("Write every amount in digits, the number then جنيه, so it can be checked.")
     if stock_counts(reply, sizes):
