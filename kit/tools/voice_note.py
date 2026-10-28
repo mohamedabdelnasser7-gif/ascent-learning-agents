@@ -6,8 +6,9 @@ documented. This sends the OpenAI-style input_audio content part with a wav file
 (WhatsApp sends ogg/opus, so ffmpeg converts it first). tests/probes/voice_probe.py
 checks this live and tries other shapes; change only transcribe() if it says so.
 
-ffmpeg reads only ogg from stdin (no other demuxer, no network or file protocol), stops
-after MAX_SECONDS of audio and writes at most MAX_WAV_BYTES. The voice note is heard
+ffmpeg reads only ogg from stdin (no other demuxer, no network or file protocol) and
+decodes only opus (no other decoder), stops after MAX_SECONDS of audio and writes at most
+MAX_WAV_BYTES. The voice note is heard
 once per turn; a second call in the same turn gets the first result.
 """
 import base64
@@ -59,9 +60,9 @@ def run(args, ctx):
 
 
 def command(ffmpeg):
-    """The ffmpeg argv: ogg from stdin only, at most MAX_SECONDS out, at most MAX_WAV_BYTES written."""
+    """The ffmpeg argv: ogg with opus from stdin only, at most MAX_SECONDS out, at most MAX_WAV_BYTES written."""
     return [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-protocol_whitelist", "pipe", "-f", "ogg", "-i", "pipe:0",
+            "-protocol_whitelist", "pipe", "-f", "ogg", "-c:a", "opus", "-i", "pipe:0",
             "-t", str(MAX_SECONDS), "-fs", str(MAX_WAV_BYTES),
             "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"]
 

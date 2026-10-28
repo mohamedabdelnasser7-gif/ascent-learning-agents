@@ -22,6 +22,7 @@ class FfmpegArgs(unittest.TestCase):
         self.assertIn("-nostdin", before)
         self.assertEqual(before[before.index("-protocol_whitelist") + 1], "pipe")
         self.assertEqual(before[before.index("-f") + 1], "ogg")
+        self.assertEqual(before[before.index("-c:a") + 1], "opus")  # the decoder, before -i
         self.assertEqual(cmd[i + 1], "pipe:0")
         after = cmd[i + 2:]
         self.assertEqual(after[after.index("-t") + 1], "120")
@@ -46,15 +47,15 @@ FFMPEG = shutil.which("ffmpeg") or (voice_note.DEFAULT_FFMPEG if Path(voice_note
 
 @unittest.skipUnless(FFMPEG, "ffmpeg is not installed")
 class RealFfmpeg(unittest.TestCase):
-    def make_ogg(self, seconds):
+    def make_ogg(self, seconds, codec=("-c:a", "libopus", "-b:a", "6k"), layout="mono"):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
         path = Path(d) / "note.ogg"
         made = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "lavfi",
-                               "-i", "anullsrc=r=48000:cl=mono", "-t", str(seconds), "-c:a", "libopus",
-                               "-b:a", "6k", str(path)], capture_output=True, timeout=60)
+                               "-i", f"anullsrc=r=48000:cl={layout}", "-t", str(seconds), *codec, "-f", "ogg",
+                               str(path)], capture_output=True, timeout=60)
         if made.returncode != 0:
-            self.skipTest("this ffmpeg cannot make an opus test file")
+            self.skipTest(f"this ffmpeg cannot make a test file with {codec[1]}")
         return path.read_bytes()
 
     def test_tiny_ogg_becomes_wav(self):
@@ -66,6 +67,13 @@ class RealFfmpeg(unittest.TestCase):
         wav = voice_note.to_wav(self.make_ogg(130), ffmpeg=FFMPEG)
         self.assertLessEqual(len(wav), voice_note.MAX_WAV_BYTES)
         self.assertAlmostEqual(len(wav), 120 * 32000, delta=4000)
+
+    def test_other_codecs_in_ogg_are_refused(self):
+        # The native vorbis encoder is experimental (-strict -2) and needs two channels.
+        for codec, layout in ((("-c:a", "vorbis", "-strict", "-2"), "stereo"), (("-c:a", "flac"), "mono")):
+            with self.subTest(codec=codec[1]):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    voice_note.to_wav(self.make_ogg(1, codec, layout), ffmpeg=FFMPEG)
 
     def test_not_ogg_is_refused(self):
         with self.assertRaises(subprocess.CalledProcessError):
