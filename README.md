@@ -10,7 +10,7 @@ An agent that learns from real results, starting with the front desk. One inbox 
 
 A front desk for an online store that runs on WhatsApp, day and night. Customers write the way they talk, in Egyptian Arabic, English or Franco, by text or voice note.
 
-It answers from the store's real data: products, sizes, stock, delivery fee and delivery days by governorate. It finds the customer's order from their WhatsApp number instead of asking for it. It places new orders as Shopify drafts, flags cash on delivery orders that look risky, cancels at the courier when asked, and hands the chat to a person when it should.
+Built: it answers from the store's real data on products, sizes and stock level (in stock, few left or out), checks every amount a reply writes next to a currency or price word against the store and delivery data before it goes out, and hands the chat to a person when it should. Coming: delivery fee and delivery days by governorate as a tool it can call, finding the customer's order from their WhatsApp number instead of asking for it, placing new orders as Shopify drafts, flagging cash on delivery orders that look risky, and cancelling at the courier when asked.
 
 ## How it learns
 
@@ -54,7 +54,7 @@ Each turn the model sees only the tools for the chat's stage, sent fresh every t
 | My order (where is it, cancel) | voice_note, handoff |
 | With a person | none, the agent waits |
 
-Delivery, draft orders, COD risk, order lookup and cancel join their stages as their files land. A small switch_stage tool moves the chat when the customer moves on, and handoff moves it to a person. Customers can send text, voice notes and photos.
+Coming: delivery, draft orders, COD risk, order lookup and cancel join their stages as their files land. Built: a small switch_stage tool moves the chat when the customer moves on, and handoff moves it to a person. Customers can send text, voice notes and photos.
 
 ## Run it
 
@@ -66,7 +66,7 @@ Python 3.14, standard library only. Tests run offline on a fake model: `python3 
 
 ## What comes next
 
-Stage 1, reading lessons, is built. A light stage 2 merges lessons into principles. Stage 3 trains proven lessons into the model itself. After the front desk come marketing, stock and returns agents on the same layer, sharing lessons, and Instagram and Messenger on the same front desk. The full plan, and how each stage is proven: [docs/HOW-IT-LEARNS.md](docs/HOW-IT-LEARNS.md).
+Built: stage 1, reading lessons. Coming: a light stage 2 that merges lessons into principles, by Sun 1 November, and stage 3, which trains proven lessons into the model itself. After the front desk come marketing, stock and returns agents on the same layer, sharing lessons, and Instagram and Messenger on the same front desk. The full plan, and how each stage is proven: [docs/HOW-IT-LEARNS.md](docs/HOW-IT-LEARNS.md).
 
 ## Credit
 
