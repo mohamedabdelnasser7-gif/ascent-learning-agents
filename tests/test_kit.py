@@ -247,6 +247,14 @@ class SeenAndChecksTest(unittest.TestCase):
         self.assertEqual(self.chats.failed_checks(self.chats.branch(cid, len(self.chats.steps(cid)))), 1)
 
 
+    def test_a_done_message_keeps_no_copy_of_its_text(self):
+        self.assertTrue(self.chats.first_seen("m1", {"message_id": "m1", "text": "عندكم مقاس ٤٣؟"}))
+        self.chats.add_step(self.chats.open("whatsapp", "2016"), "user", content="عندكم مقاس ٤٣؟", message_id="m1")
+        with self.chats.db.tx() as c:
+            row = c.execute("SELECT status, payload FROM seen_messages WHERE message_id = 'm1'").fetchone()
+        self.assertEqual(tuple(row), ("done", None))
+        self.assertEqual(self.chats.pending(), [])
+
     def test_model_errors_reset_and_branch_follows(self):
         cid = self.chats.open("whatsapp", "2013")
         self.chats.add_step(cid, "user", content="hi")

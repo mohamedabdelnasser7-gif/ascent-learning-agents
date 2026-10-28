@@ -8,9 +8,10 @@ at any step.
 Media bytes are never stored, only a sha256 and the mime type.
 
 Webhook message ids: an id is saved as pending, with the parsed message, when it is
-queued, and marked done in the same transaction that saves the customer's step. A
-restart re-queues pending messages (at most MAX_ATTEMPTS times each), so nothing that
-Meta already got a 200 for is lost.
+queued, and marked done in the same transaction that saves the customer's step; the
+parsed message is dropped then, since the step holds it. A restart re-queues pending
+messages (at most MAX_ATTEMPTS times each), so nothing that Meta already got a 200 for
+is lost.
 """
 import json
 import time
@@ -163,7 +164,8 @@ class Chats:
             n = self._add(c, chat_id, role, content, tool_calls, tool_call_id, name, media)
             c.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (time.time(), chat_id))
             if message_id:
-                c.execute("UPDATE seen_messages SET status = 'done' WHERE message_id = ?", (message_id,))
+                c.execute("UPDATE seen_messages SET status = 'done', payload = NULL WHERE message_id = ?",
+                          (message_id,))
             return n
 
     def _add(self, c, chat_id, role, content=None, tool_calls=None, tool_call_id=None, name=None, media=None):
