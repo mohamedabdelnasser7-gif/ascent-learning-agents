@@ -440,5 +440,130 @@ class NumbersAsWritten(unittest.TestCase):
         self.assertEqual(size_number_amounts(store.price_points(), store.size_strings()), [])
 
 
+# Round 3 review (R3-1 to R3-5, false blocks) and red team (R3-F2 to R3-F4), 28 Oct.
+FR = "3ndko socks? bkam?"
+
+
+class Round3(unittest.TestCase):
+    def setUp(self):
+        clean_env(self)
+        self.args = (store.price_points(), store.vocabulary(), store.size_strings())
+
+    def refused(self, reply, customer, words):
+        with self.subTest(reply=reply):
+            passed, fb = check(reply, customer, *self.args)
+            self.assertFalse(passed)
+            self.assertIn(words, fb)
+
+    def passes(self, reply, customer):
+        with self.subTest(reply=reply):
+            self.assertEqual(check(reply, customer, *self.args), (True, ""))
+
+    def test_an_amount_in_words_after_a_price_word_or_be_is_refused(self):
+        # R3-1 and R3-F3: no currency word after it, so only the words rule sees these.
+        for reply, customer in (
+                ("ده بألف", AR), ("الكوتشي بألفين", AR), ("سعره ألف", AR), ("الشراب بخمسمية", AR),
+                ("The price is one thousand.", EN), ("It costs five hundred.", EN), ("el se3r alf", FR),
+                ("الهودي بألف بس", AR), ("الشراب بميتين", AR), ("el socks b meteen bs", FR),
+                ("The socks are two hundred.", EN), ("el hoodie b alf", FR), ("nos alf gineh", FR),
+                ("الشراب بتلتمية", AR), ("el socks b khomsomeya", FR), ("التوصيل بسبعين", AR),
+                ("الشراب بسبعين", AR), ("الشراب ب سبعين", AR)):
+            self.refused(reply, customer, "digits")
+
+    def test_digits_then_the_word_for_thousand_are_refused(self):
+        for reply, customer in (("الهودي 1.5 ألف", AR), ("الهودي ١٫٥ الف", AR), ("The price is 1 thousand.", EN),
+                                ("It is 1 thousand EGP.", EN)):
+            self.refused(reply, customer, "digits")
+
+    def test_number_words_that_are_not_amounts_pass(self):
+        for reply, customer in (
+                ("ألف شكر", AR), ("ألف سلامة عليك", AR), ("إن شاء الله تكون بألف خير", AR), ("اغسله بمية ساقعة", AR),
+                ("Delivery is for two days.", EN), ("It comes in two sizes.", EN), ("It is available in two sizes.", EN),
+                ("Shipping takes two to three working days.", EN), ("التوصيل من تلاتة لخمسة أيام", AR),
+                ("You can exchange it for another one in size 44.", EN), ("تقدر تبدله بواحد تاني مقاس 44", AR),
+                ("Five hundred customers bought these this week.", EN)):
+            self.passes(reply, customer)
+
+    def test_short_fractions_and_dotted_dates_are_not_bare_amounts(self):
+        for reply, customer in (("The courier comes between 10.30 and 12.30.", EN), ("It reaches you on 28.10.", EN),
+                                ("هيوصلك يوم 28.10", AR)):
+            self.passes(reply, customer)
+        for reply, customer in (("Black socks 1.500", EN), ("الشراب ١٫٥٠٠", AR), ("It is 12,3456.", EN),
+                                ("Black socks 500.0.0", EN)):
+            self.refused(reply, customer, "not in the store or delivery data")
+
+    def test_a_price_word_before_an_order_number_keeps_the_amount(self):
+        # R3-2, and the threshold in R3-F4.
+        for reply, customer in (("اجمالي الطلب 1500", AR), ("حساب الطلب 1500", AR), ("Total for your order: 1500.", EN),
+                                ("السعر رقم 500", AR), ("Free shipping on orders 500 and above.", EN)):
+            self.refused(reply, customer, "not in the store or delivery data")
+        self.passes("Your order 1500 is ready.", EN)
+        self.passes("Your total for order #1042 is 949 EGP.", EN)
+        self.assertEqual(prices_in("Your order 1500 is ready."), [])
+
+    def test_every_digit_counts_and_a_decimal_comma_is_a_point(self):
+        # R3-3 and R3-F4: dot thousands, decimal commas, letters after the number, item-price lists.
+        for reply, n in (("Black socks 1.500", Decimal("1.5")), ("الشراب ١٫٥٠٠", Decimal("1.5")),
+                         ("500,50", Decimal("500.5")), ("Black socks 649,99.", Decimal("649.99")),
+                         ("The price is 649,99", Decimal("649.99")), ("الكوتشي ٥٠٠٬٠٠", 500), ("12,3456", 3456),
+                         ("el socks 500bs", 500), ("Black socks 500.0.0", 500)):
+            with self.subTest(reply=reply):
+                self.assertEqual(prices_in(reply), [n])
+        self.assertEqual(prices_in("Black socks-500, white socks-550."), [500, 550])
+        for reply, customer in (("Black socks 1.500", EN), ("Black socks 649,99.", EN), ("el socks 500bs", FR)):
+            self.refused(reply, customer, "not in the store or delivery data")
+        self.passes("The black socks are 649,00 EGP.", EN)
+        for reply in ("NLS0001", "BO-2936845", "It arrives on 28.10.2026."):
+            with self.subTest(reply=reply):
+                self.assertEqual(prices_in(reply), [])
+
+    def test_a_number_of_thousands_of_digits_never_raises(self):
+        # R3-4: Python refuses to turn an int of more than 4300 digits into text.
+        huge = "9" * 5000
+        passed, fb = check("Hoodie: " + huge, EN, *self.args)
+        self.assertFalse(passed)
+        self.assertIn("9" * 20 + "...", fb)
+        self.assertLess(len(fb), 1000)
+        self.assertEqual(prices_in(huge), [Decimal(huge)])
+        self.assertEqual(stock_counts(huge + " left"), [huge + " left"])
+
+    def test_a_fee_after_a_city_or_before_a_time_is_read(self):
+        # R3-F2: a fee table, a fee then a time, and Franco spellings of جنيه.
+        for reply, ns in (("Cairo 70, Alex 90, other cities 95.", [70, 90, 95]),
+                          ("القاهرة 70 والاسكندرية 90 وباقي المحافظات 95", [70, 90, 95]),
+                          ("القاهرة 70 والاسكندرية 90", [70, 90]), ("cairo 70, alex 90, ba2i el mo7afzat 95", [70, 90, 95]),
+                          ("Shipping 70 to 3 days.", [70]), ("el sha7n 70 le 3 ayam", [70]),
+                          ("el socks 70 gineh", [70]), ("el socks 70 gineeh", [70]), ("el socks 70 geneeh", [70]),
+                          ("el socks 70 ginee", [70]), ("E£70", [70])):
+            with self.subTest(reply=reply):
+                self.assertEqual(prices_in(reply), ns)
+        for reply, customer in (("Cairo 70, Alex 90, other cities 95.", EN), ("القاهرة 70 والاسكندرية 90", AR),
+                                ("Shipping 70 to 3 days.", EN), ("el sha7n 70 le 3 ayam", FR),
+                                ("Cairo 70 gineh, Alex 85 gineh.", EN)):
+            self.refused(reply, customer, "not in the store or delivery data")
+        for reply, customer in (("Cairo 60, Alex 85.", EN), ("القاهرة 60 والاسكندرية 85", AR),
+                                ("Cairo 2 days, Alex 3 days.", EN), ("Delivery to Cairo 2 to 3 days.", EN)):
+            self.passes(reply, customer)
+
+    def test_franco_le_before_a_small_number_and_landlines_are_not_amounts(self):
+        # False blocks from the round 3 review.
+        for reply, customer in (("el ma2as mn 42 le 45.", FR), ("mawgod mn 42 le 45.", FR), ("el L ma2as 45 le 52.", FR),
+                                ("el junior mn 30 le 37.", FR), ("momken t8ayar le 44.", FR),
+                                ("Call us on 02 2345 6789.", EN), ("Call us on 0223456789.", EN),
+                                ("Our Alex office is on 03 4567890.", EN), ("كلمنا على ٠٢٢٣٤٥٦٧٨٩", AR),
+                                ("Delivery on 28.10.2026.", EN)):
+            self.passes(reply, customer)
+        # Upper case LE stays the currency.
+        self.refused("Black socks LE 70", EN, "not in the store or delivery data")
+
+    def test_round3_review_survivors(self):
+        # R3-5: each mutant that survived the reviewer's sweep.
+        self.assertEqual(prices_in("model 1500"), [1500])        # year-any-4-digits
+        self.assertEqual(prices_in("el model bta3 sana 2024"), [])  # year-sana-off
+        for reply, n in (("1012345678", 1012345678), ("51012345678", 51012345678)):  # phone-prefix-any
+            with self.subTest(reply=reply):
+                self.assertEqual(prices_in(reply), [n])
+
+
 if __name__ == "__main__":
     unittest.main()
