@@ -10,7 +10,7 @@ An agent that learns from real results, starting with the front desk. One inbox 
 
 A front desk for an online store that runs on WhatsApp, day and night. Customers write the way they talk, in Egyptian Arabic, English or Franco, by text or voice note.
 
-Built: it answers from the store's real data on products, sizes and stock level (in stock, few left or out), checks every amount a reply writes next to a currency or price word against the store and delivery data before it goes out, and hands the chat to a person when it should. Coming: delivery fee and delivery days by governorate as a tool it can call, finding the customer's order from their WhatsApp number instead of asking for it, placing new orders as Shopify drafts, flagging cash on delivery orders that look risky, and cancelling at the courier when asked.
+Built: it answers from the store's real data on products, sizes and stock level (in stock, few left or out), checks every amount in a reply against the store and delivery data before it goes out (any number next to a currency or price word, and any other number of 3 or more digits that is not an order number, phone number or date), and hands the chat to a person when it should. Coming: delivery fee and delivery days by governorate as a tool it can call, finding the customer's order from their WhatsApp number instead of asking for it, placing new orders as Shopify drafts, flagging cash on delivery orders that look risky, and cancelling at the courier when asked.
 
 ## How it learns
 
